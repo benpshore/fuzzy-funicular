@@ -111,7 +111,18 @@ def import_path(
         tmp = tmp_dir / (h.hexdigest()[:16] + path.suffix.lower())
         shutil.copy2(path, tmp)
         path = tmp
-    return _register(settings, store, jobs, path, path.name, h.hexdigest(), size, source, extract)
+    return _register(
+        settings,
+        store,
+        jobs,
+        path,
+        path.name,
+        h.hexdigest(),
+        size,
+        source,
+        extract,
+        discard_rejects=not move,  # a user's inbox file is theirs; only our temp copies go
+    )
 
 
 def _register(
@@ -124,10 +135,13 @@ def _register(
     size: int,
     source: str,
     extract: ExtractSettings | None,
+    *,
+    discard_rejects: bool = True,
 ) -> Imported:
     sn = sniff(staged)
     if sn.kind not in ACCEPTED:
-        staged.unlink(missing_ok=True)
+        if discard_rejects:
+            staged.unlink(missing_ok=True)
         raise ImportError_(f"unsupported or unrecognised file type ({sn.ext or 'no extension'})")
     dup = store.find_by_sha(sha256)
     name = display_name(filename)
