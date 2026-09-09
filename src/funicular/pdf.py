@@ -28,6 +28,7 @@ from .config import ExtractSettings
 from .detect import DocSignal, analyse_pdf
 from .ocr import OcrUnavailableError, make_ocr_function, select_backend
 from .ocr.layout import Positioned, layout_text
+from .resources import check_cancel
 from .tools import ghostscript, poppler
 from .tools.binaries import MissingBinaryError
 
@@ -201,6 +202,7 @@ def _extract_pdf(
     signal = analyse_pdf(path, settings)
     active = path
 
+    check_cancel()
     # ---- repair ---------------------------------------------------------------------------
     poppler_ok = poppler.available()
     if poppler_ok:
@@ -242,6 +244,7 @@ def _extract_pdf(
             result.warnings.append(f"pypdfium2: {exc}")
         return result
 
+    check_cancel()
     # ---- fonts ----------------------------------------------------------------------------
     if poppler_ok:
         try:
@@ -253,6 +256,7 @@ def _extract_pdf(
         except (poppler.PopplerError, MissingBinaryError) as exc:
             result.warnings.append(f"pdffonts: {exc}")
 
+    check_cancel()
     # ---- OCR ------------------------------------------------------------------------------
     ocr_targets: list[int] = []
     if settings.ocr == "auto":
@@ -277,6 +281,7 @@ def _extract_pdf(
             try:
                 total = len(ocr_targets)
                 for i, pno in enumerate(ocr_targets):
+                    check_cancel()
                     progress("ocr", i, total)
                     page = doc[pno - 1]
                     page.remove_rotation()
@@ -296,6 +301,7 @@ def _extract_pdf(
                 result.engines["ocr"] = f"{backend.name} on {len(result.ocr_pages)} page(s)"
                 result.signal = analyse_pdf(active, settings)
 
+    check_cancel()
     # ---- layout text (poppler) --------------------------------------------------------------
     progress("layout", 0, 1)
     if poppler_ok:
@@ -313,6 +319,7 @@ def _extract_pdf(
             result.warnings.append(f"layout fallback: {exc}")
     progress("layout", 1, 1)
 
+    check_cancel()
     # ---- markdown (pymupdf4llm + pymupdf-layout) ----------------------------------------------
     try:
         result.markdown = _markdown(active, settings, progress)
@@ -322,6 +329,7 @@ def _extract_pdf(
     except Exception as exc:
         result.warnings.append(f"pymupdf4llm: {exc}")
 
+    check_cancel()
     # ---- plain text (PyMuPDF sorted) -----------------------------------------------------------
     progress("text", 0, 1)
     try:
@@ -332,6 +340,7 @@ def _extract_pdf(
         result.warnings.append(f"pymupdf text: {exc}")
     progress("text", 1, 1)
 
+    check_cancel()
     # ---- garble check ------------------------------------------------------------------------
     ratio = _garbage_ratio(result.plain_text or result.layout_text)
     result.garbage_ratio = round(ratio, 4)
@@ -345,6 +354,7 @@ def _extract_pdf(
             f"{ratio:.0%} of extracted characters are unmappable{hint}; consider --ocr force"
         )
 
+    check_cancel()
     # ---- cross-check with pdfium --------------------------------------------------------------
     try:
         result.pdfium_chars = pdfium_char_count(active)
@@ -377,6 +387,7 @@ def _markdown(path: Path, settings: ExtractSettings, progress: Progress) -> str:
         chunk = 8
         parts: list[str] = []
         for start in range(0, n, chunk):
+            check_cancel()
             progress("markdown", start, n)
             pages = list(range(start, min(start + chunk, n)))
             kwargs: dict = {"pages": pages, "show_progress": False}

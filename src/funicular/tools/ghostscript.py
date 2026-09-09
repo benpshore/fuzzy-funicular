@@ -10,6 +10,7 @@ import re
 import subprocess
 from pathlib import Path
 
+from ..resources import run as _run_limited
 from .binaries import MissingBinaryError, find_binary
 
 BREW_HINT = "Install with: brew install ghostscript   (Linux: apt-get install ghostscript)"
@@ -57,7 +58,7 @@ def repair_pdf(src: Path, dst: Path, *, timeout: int = DEFAULT_TIMEOUT) -> Path:
         f"-sOutputFile={dst}",
         str(src),
     ]
-    proc = subprocess.run(argv, capture_output=True, timeout=timeout, check=False)
+    proc = _run_limited(argv, timeout=timeout)
     if proc.returncode != 0 or not dst.exists() or dst.stat().st_size == 0:
         err = proc.stderr.decode("utf-8", "replace") + proc.stdout.decode("utf-8", "replace")
         raise GhostscriptError(f"gs pdfwrite failed ({proc.returncode}): {err[:500]}")
@@ -85,7 +86,7 @@ def rasterize_png(
     if last is not None:
         argv.append(f"-dLastPage={last}")
     argv += [f"-sOutputFile={out_prefix}-%d.png", str(src)]
-    proc = subprocess.run(argv, capture_output=True, timeout=timeout, check=False)
+    proc = _run_limited(argv, timeout=timeout)
     if proc.returncode != 0:
         raise GhostscriptError(proc.stderr.decode("utf-8", "replace")[:500])
     files = sorted(
@@ -108,7 +109,7 @@ def text_only_pdf(src: Path, dst: Path, *, timeout: int = DEFAULT_TIMEOUT) -> Pa
         f"-sOutputFile={dst}",
         str(src),
     ]
-    proc = subprocess.run(argv, capture_output=True, timeout=timeout, check=False)
+    proc = _run_limited(argv, timeout=timeout)
     if proc.returncode != 0 or not dst.exists():
         raise GhostscriptError(proc.stderr.decode("utf-8", "replace")[:500])
     return dst

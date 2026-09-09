@@ -16,6 +16,12 @@
     <div class="bar" style="width: {{ doc.progress }}%"></div>
   </div>
   <p class="row-stage muted small" aria-live="polite">{% if doc.status not in ('done','failed') %}{{ stage_label(doc.stage or 'queued') }}{% endif %}</p>
+  {% if doc.status in ('queued','running') %}
+  <form method="post" action="/doc/{{ doc.id }}/cancel" class="cancel-form">
+    <input type="hidden" name="csrf" value="{{ user.csrf }}">
+    <button class="btn btn-danger" type="submit">Cancel processing</button>
+  </form>
+  {% endif %}
   {% if doc.error %}<p class="bad">{{ doc.error }}</p>{% endif %}
   {% if doc.warnings %}
   <details class="notes"><summary>{{ doc.warnings|length }} note{{ 's' if doc.warnings|length != 1 }}</summary>

@@ -18,6 +18,7 @@ from typing import Any
 
 from ..config import ExtractSettings, Settings
 from ..pipeline import ingest
+from ..resources import JobContext, MemoryGuard, SystemMonitor, current_job
 from .store import Store
 
 log = logging.getLogger(__name__)
@@ -53,18 +54,57 @@ class JobManager:
         self.loop: asyncio.AbstractEventLoop | None = None
         self._subscribers: set[asyncio.Queue] = set()
         self._lock = threading.Lock()
-        self._active: dict[str, float] = {}
+        self._active: dict[str, JobContext] = {}
+        self.monitor = SystemMonitor(settings.data_dir)
+        self.guard = MemoryGuard(
+            self.contexts,
+            job_cap_mb=settings.job_memory_cap_mb,
+            job_max_procs=settings.job_max_procs,
+            min_free_mb=settings.min_free_mb,
+        )
+        self.stopping = False
 
     # ------------------------------------------------------------------ lifecycle
     def start(self, loop: asyncio.AbstractEventLoop) -> None:
         self.loop = loop
+        if not self.guard.is_alive():
+            self.guard.start()
         # Resume anything that was queued/running when the process last stopped.
         for doc in self.store.list(status="queued") + self.store.list(status="running"):
             self.store.requeue(doc.id)
             self.submit(doc.id)
 
-    def stop(self) -> None:
+    def stop(self, reason: str = "server shutting down") -> None:
+        """Clean exit: cancel every job (killing its process tree), stop the guard."""
+        self.stopping = True
+        for ctx in self.contexts():
+            ctx.cancel(reason)
+        self.guard.stop()
         self.pool.shutdown(wait=False, cancel_futures=True)
+
+    def contexts(self) -> list[JobContext]:
+        with self._lock:
+            return list(self._active.values())
+
+    def cancel(self, doc_id: str, reason: str = "cancelled by user") -> bool:
+        with self._lock:
+            ctx = self._active.get(doc_id)
+        if ctx is None:
+            return False
+        ctx.cancel(reason)
+        return True
+
+    def system(self) -> dict[str, Any]:
+        snap = self.monitor.snapshot(self.contexts())
+        snap["pressure"] = self.guard.pressure
+        snap["last_kill"] = self.guard.last_kill
+        snap["workers"] = self.settings.workers
+        snap["caps"] = {
+            "job_memory_cap_mb": self.settings.job_memory_cap_mb,
+            "job_max_procs": self.settings.job_max_procs,
+            "min_free_mb": self.settings.min_free_mb,
+        }
+        return snap
 
     # ------------------------------------------------------------------ pub/sub
     def subscribe(self) -> asyncio.Queue:
@@ -98,10 +138,12 @@ class JobManager:
 
     # ------------------------------------------------------------------ jobs
     def submit(self, doc_id: str, extract: ExtractSettings | None = None) -> None:
+        if self.stopping:
+            return
         with self._lock:
             if doc_id in self._active:
                 return
-            self._active[doc_id] = time.time()
+            self._active[doc_id] = JobContext(id=doc_id)
         self._publish(
             {
                 "type": "progress",
@@ -119,14 +161,47 @@ class JobManager:
             return list(self._active)
 
     def _run(self, doc_id: str, extract: ExtractSettings) -> None:
+        with self._lock:
+            ctx = self._active.get(doc_id)
         doc = self.store.get(doc_id)
-        if doc is None:
+        if doc is None or ctx is None:
             with self._lock:
                 self._active.pop(doc_id, None)
             return
+        token = current_job.set(ctx)
+        try:
+            self._wait_for_memory(ctx, doc)
+            self._run_job(doc_id, doc, ctx, extract)
+        finally:
+            current_job.reset(token)
+            with self._lock:
+                self._active.pop(doc_id, None)
+
+    def _wait_for_memory(self, ctx: JobContext, doc) -> None:
+        """Admission control: hold a job while free memory is below what it is likely to need."""
+        needed = max(512.0, min(doc.size / 2**20 * 4, self.settings.job_memory_cap_mb / 2))
+        waited = 0.0
+        while not self.guard.admission_ok(needed) and waited < 600 and not ctx.cancelled:
+            if waited == 0:
+                self.store.update_progress(doc.id, "queued", 0, status="queued")
+                self._publish(
+                    {
+                        "type": "progress",
+                        "id": doc.id,
+                        "status": "queued",
+                        "stage": "queued",
+                        "label": "Waiting for memory",
+                        "progress": 0,
+                    }
+                )
+            time.sleep(2)
+            waited += 2
+
+    def _run_job(self, doc_id: str, doc, ctx: JobContext, extract: ExtractSettings) -> None:
         last = {"t": 0.0}
 
         def progress(stage: str, done: int, total: int) -> None:
+            ctx.check()
             pct = stage_percent(stage, done, total)
             now = time.monotonic()
             if now - last["t"] < 0.15 and done != total:

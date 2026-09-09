@@ -88,11 +88,20 @@ class Settings(BaseModel):
     allowed_github_ids: frozenset[int] = frozenset()
     session_idle_minutes: int = 60 * 12
     session_absolute_hours: int = 24 * 7
-    max_upload_mb: int = 512
+    max_upload_mb: int = 20480
     workers: int = 2
+    # Resource guard: per-job process-tree memory cap, process-count cap (fork-bomb guard),
+    # and the free-memory floor below which new jobs wait.
+    job_memory_cap_mb: int = 8192
+    job_max_procs: int = 96
+    min_free_mb: int = 1024
     watch_inbox: bool = False
     # Behind Tailscale Serve / Caddy: trust X-Forwarded-Proto from the loopback proxy only.
     trust_proxy: bool = False
+
+    @property
+    def pid_file(self) -> Path:
+        return self.data_dir / "funicular.pid"
 
     @classmethod
     def from_env(cls, dotenv: Path | None = None) -> Settings:
@@ -125,8 +134,11 @@ class Settings(BaseModel):
             allowed_github_ids=allowed,
             session_idle_minutes=_env_int("SESSION_IDLE_MINUTES", 60 * 12),
             session_absolute_hours=_env_int("SESSION_ABSOLUTE_HOURS", 24 * 7),
-            max_upload_mb=_env_int("MAX_UPLOAD_MB", 512),
+            max_upload_mb=_env_int("MAX_UPLOAD_MB", 20480),
             workers=max(1, min(_env_int("WORKERS", 2), 8)),
+            job_memory_cap_mb=_env_int("JOB_MEMORY_CAP_MB", 8192),
+            job_max_procs=_env_int("JOB_MAX_PROCS", 96),
+            min_free_mb=_env_int("MIN_FREE_MB", 1024),
             watch_inbox=_env_bool("WATCH_INBOX", False),
             trust_proxy=_env_bool("TRUST_PROXY", False),
         )
