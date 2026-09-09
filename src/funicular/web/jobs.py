@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from ..config import ExtractSettings, Settings
+from ..estimate import Timings
 from ..pipeline import ingest
 from ..resources import Cancelled, JobContext, MemoryGuard, SystemMonitor, current_job
 from .store import Store
@@ -63,6 +64,7 @@ class JobManager:
             min_free_mb=settings.min_free_mb,
         )
         self.stopping = False
+        self.timings = Timings(settings.data_dir / "timings.json")
 
     # ------------------------------------------------------------------ lifecycle
     def start(self, loop: asyncio.AbstractEventLoop) -> None:
@@ -201,6 +203,100 @@ class JobManager:
             label,
         )
         return bid
+
+    # ------------------------------------------------------------------ compression
+    def submit_compress(self, doc_id: str, strength: int, engine: str = "auto") -> bool:
+        key = f"compress:{doc_id}"
+        with self._lock:
+            if key in self._active or doc_id in self._active:
+                return False
+            self._active[key] = JobContext(id=key)
+        self._publish(
+            {
+                "type": "progress",
+                "id": doc_id,
+                "status": "running",
+                "stage": "compress",
+                "label": "Compressing",
+                "progress": 5,
+            }
+        )
+        self.pool.submit(self._run_compress, doc_id, strength, engine)
+        return True
+
+    def _run_compress(self, doc_id: str, strength: int, engine: str) -> None:
+        from ..compress import compress
+
+        key = f"compress:{doc_id}"
+        with self._lock:
+            ctx = self._active.get(key)
+        doc = self.store.get(doc_id)
+        if ctx is None or doc is None:
+            with self._lock:
+                self._active.pop(key, None)
+            return
+        token = current_job.set(ctx)
+        try:
+            src = doc.dir / doc.outputs.get("ocr_pdf", doc.outputs.get("original", ""))
+            if not src.is_file() or doc.kind != "pdf":
+                raise FileNotFoundError("no PDF to compress")
+            t0 = time.monotonic()
+            res = compress(src, doc.dir / "compressed.pdf", strength, engine=engine)
+            self.timings.record(
+                f"compress.{res.engine.split()[0]}", time.monotonic() - t0, max(doc.pages, 1)
+            )
+            outputs = dict(doc.outputs)
+            outputs["compressed"] = "compressed.pdf"
+            self.store.set_outputs(doc_id, outputs)
+            self.store.audit(
+                "compress",
+                f"{doc_id}: {res.original_bytes} -> {res.output_bytes}"
+                f" ({res.engine}, strength {strength})",
+            )
+            self._publish(
+                {
+                    "type": "done",
+                    "id": doc_id,
+                    "status": "done",
+                    "stage": "done",
+                    "label": "Done",
+                    "progress": 100,
+                    "needs_ocr": doc.needs_ocr,
+                    "warnings": doc.warnings,
+                    "compressed": res.to_dict(),
+                }
+            )
+        except Cancelled as exc:
+            self._publish(
+                {
+                    "type": "done",
+                    "id": doc_id,
+                    "status": "done",
+                    "stage": "done",
+                    "label": "Done",
+                    "progress": 100,
+                    "needs_ocr": doc.needs_ocr,
+                    "warnings": doc.warnings + [f"compression cancelled: {exc}"],
+                }
+            )
+        except Exception as exc:
+            log.exception("compress failed for %s", doc_id)
+            self._publish(
+                {
+                    "type": "done",
+                    "id": doc_id,
+                    "status": "done",
+                    "stage": "done",
+                    "label": "Done",
+                    "progress": 100,
+                    "needs_ocr": doc.needs_ocr,
+                    "warnings": doc.warnings + [f"compression failed: {exc}"],
+                }
+            )
+        finally:
+            current_job.reset(token)
+            with self._lock:
+                self._active.pop(key, None)
 
     def cancel_batch(self, bid: str) -> bool:
         return self.cancel(f"batch:{bid}", "batch cancelled by user")
@@ -352,9 +448,14 @@ class JobManager:
 
     def _run_job(self, doc_id: str, doc, ctx: JobContext, extract: ExtractSettings) -> None:
         last = {"t": 0.0}
+        clock: dict[str, float] = {}
 
         def progress(stage: str, done: int, total: int) -> None:
             ctx.check()
+            now_m = time.monotonic()
+            clock.setdefault(stage, now_m)
+            if total and done >= total and stage in clock:
+                self.timings.record(_timing_key(stage, extract), now_m - clock.pop(stage), total)
             pct = stage_percent(stage, done, total)
             now = time.monotonic()
             if now - last["t"] < 0.15 and done != total:
@@ -441,6 +542,17 @@ class JobManager:
                 self._active.pop(doc_id, None)
 
 
+def _timing_key(stage: str, extract: ExtractSettings) -> str:
+    if stage == "ocr":
+        backend = extract.ocr_backend
+        if backend == "auto":
+            import sys
+
+            backend = "macocr" if sys.platform == "darwin" else "tesseract"
+        return f"ocr.{backend}"
+    return stage
+
+
 def _original_path(doc_dir: Path) -> Path | None:
     for p in doc_dir.glob("original.*"):
         return p
@@ -486,4 +598,5 @@ def _suffix_for(key: str, src: Path) -> str:
         "text": ".txt",
         "report": ".report.json",
         "ocr_pdf": ".ocr.pdf",
+        "compressed": ".compressed.pdf",
     }.get(key, src.suffix)

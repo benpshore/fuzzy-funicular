@@ -189,6 +189,56 @@
     }
   }
 
+  // ---------- compression preview (live, debounced; the form works without this) ----------
+  var pf = document.getElementById("compress-preview-form");
+  if (pf && window.fetch) {
+    var slider = document.getElementById("strength");
+    var out = document.getElementById("strength-out");
+    var timer = null;
+    function mirror() {
+      document.querySelectorAll("[data-mirror]").forEach(function (h) {
+        var src = pf.querySelector('[name="' + h.dataset.mirror + '"]:checked') || pf.querySelector('[name="' + h.dataset.mirror + '"]');
+        if (src) h.value = src.value;
+      });
+    }
+    function refresh() {
+      var engine = (pf.querySelector('[name="engine"]:checked') || {}).value || "auto";
+      var url = "/doc/" + encodeURIComponent(pf.dataset.docId) + "/plan?op=compress&strength=" + slider.value + "&engine=" + engine;
+      var plan = document.getElementById("plan");
+      plan.setAttribute("aria-busy", "true");
+      fetch(url, { headers: { Accept: "application/json" }, credentials: "same-origin" })
+        .then(function (r) { return r.json(); })
+        .then(function (p) {
+          if (p.error) { plan.innerHTML = '<h2 class="h2">Preview</h2><p class="bad"></p>'; plan.querySelector(".bad").textContent = p.error; return; }
+          var h = function (n) { var u = ["B","KB","MB","GB"], i = 0; while (n >= 1024 && i < 3) { n /= 1024; i++; } return (i ? n.toFixed(1) : n) + " " + u[i]; };
+          plan.innerHTML = '<h2 class="h2">Preview</h2><dl class="kv"><dt>Now</dt><dd></dd><dt>After</dt><dd><strong></strong> (<span></span> of the original)</dd><dt>Time</dt><dd></dd><dt>Engine</dt><dd></dd></dl>';
+          var dd = plan.querySelectorAll("dd");
+          dd[0].textContent = h(p.original_bytes) + " \u00B7 " + p.pages + " pages";
+          dd[1].querySelector("strong").textContent = "\u2248 " + h(p.estimated_bytes);
+          dd[1].querySelector("span").textContent = Math.round(100 * p.ratio) + "%";
+          dd[2].textContent = "\u2248 " + p.estimated_seconds + " s";
+          dd[3].textContent = p.engine + " \u00B7 " + p.level.label + (p.note ? " \u00B7 " + p.note : "");
+        })
+        .catch(function () {})
+        .then(function () { plan.removeAttribute("aria-busy"); });
+    }
+    slider.addEventListener("input", function () { out.textContent = slider.value; mirror(); clearTimeout(timer); timer = setTimeout(refresh, 500); });
+    pf.querySelectorAll('[name="engine"]').forEach(function (r) { r.addEventListener("change", function () { mirror(); refresh(); }); });
+    pf.querySelectorAll(".chip").forEach(function (b) { b.addEventListener("click", function (e) { e.preventDefault(); slider.value = b.value; out.textContent = b.value; mirror(); refresh(); }); });
+  }
+  // reprocess estimate on the document page
+  var rp = document.getElementById("reprocess-plan");
+  if (rp && window.fetch) {
+    var form = rp.closest(".card").querySelector('form[action$="/reprocess"]');
+    var show = function () {
+      var ocr = (form.querySelector('[name="ocr"]:checked') || {}).value || "auto";
+      fetch("/doc/" + encodeURIComponent(rp.dataset.docId) + "/plan?op=reprocess&ocr=" + ocr, { headers: { Accept: "application/json" }, credentials: "same-origin" })
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (p) { if (!p) return; rp.textContent = "Re-run estimate: about " + p.estimate.seconds + " s, up to " + Math.round(p.estimate.peak_mb) + " MB" + (p.estimate.note ? " (" + p.estimate.note + ")" : ""); });
+    };
+    if (form) { form.querySelectorAll('[name="ocr"]').forEach(function (r) { r.addEventListener("change", show); }); show(); }
+  }
+
   // ---------- select all for export ----------
   var selectAll = document.getElementById("select-all");
   if (selectAll) selectAll.addEventListener("change", function () {

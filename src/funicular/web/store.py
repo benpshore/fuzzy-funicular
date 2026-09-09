@@ -325,6 +325,13 @@ class Store:
                 (doc_id, row["title"], body_text[:2_000_000]),
             )
 
+    def set_outputs(self, doc_id: str, outputs: dict[str, str]) -> None:
+        with self._conn() as c:
+            c.execute(
+                "UPDATE documents SET outputs=?, updated_at=? WHERE id=?",
+                (json.dumps(outputs), time.time(), doc_id),
+            )
+
     def fail(self, doc_id: str, error: str) -> None:
         with self._conn() as c:
             c.execute(

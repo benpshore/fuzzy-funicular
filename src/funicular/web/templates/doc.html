@@ -38,7 +38,7 @@
     <section class="card" aria-labelledby="files-h">
       <h2 id="files-h" class="h2">Files</h2>
       <ul class="list plain">
-        {% for key, label in [('layout','Layout text (.layout.txt)'),('markdown','Markdown (.md)'),('text','Plain text (.txt)'),('ocr_pdf','Searchable PDF'),('report','Report (.json)'),('original','Original')] %}
+        {% for key, label in [('layout','Layout text (.layout.txt)'),('markdown','Markdown (.md)'),('text','Plain text (.txt)'),('ocr_pdf','Searchable PDF'),('compressed','Compressed PDF'),('report','Report (.json)'),('original','Original')] %}
         {% if key in doc.outputs %}
         <li><a class="row-link" href="/doc/{{ doc.id }}/file/{{ key }}?download=1"><span class="row-main">{{ label }}</span><span class="chev" aria-hidden="true">⤓</span></a></li>
         {% endif %}
@@ -48,6 +48,10 @@
 
     <section class="card" aria-labelledby="act-h">
       <h2 id="act-h" class="h2">Actions</h2>
+      {% if doc.kind == 'pdf' and doc.status == 'done' %}
+      <p><a class="btn btn-secondary" href="/doc/{{ doc.id }}/compress">Compress PDF…</a></p>
+      {% endif %}
+      <p class="muted small" id="reprocess-plan" data-doc-id="{{ doc.id }}" aria-live="polite"></p>
       <form method="post" action="/doc/{{ doc.id }}/reprocess" class="stack">
         <input type="hidden" name="csrf" value="{{ user.csrf }}">
         <fieldset class="row"><legend class="label">Re-run extraction</legend>

@@ -36,3 +36,17 @@ def test_detect_command(fixtures):
     r = runner.invoke(app, ["detect", str(fixtures["mixed"])])
     assert r.exit_code == 0
     assert "pages needing OCR: [2]" in r.output
+
+
+def test_compress_and_estimate_commands(fixtures, tmp_path):
+    r = runner.invoke(app, ["compress", str(fixtures["scholarly"]), "--preview"])
+    assert r.exit_code == 0 and "→" in r.output
+    out = tmp_path / "c.pdf"
+    r = runner.invoke(
+        app, ["compress", str(fixtures["scholarly"]), "-o", str(out), "--strength", "80"]
+    )
+    assert r.exit_code == 0 and out.exists()
+    r = runner.invoke(
+        app, ["estimate", str(fixtures["scholarly"]), str(fixtures["md"]), "--ocr", "auto"]
+    )
+    assert r.exit_code == 0 and "total" in r.output
