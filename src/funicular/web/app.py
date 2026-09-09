@@ -700,6 +700,127 @@ def create_app(settings: Settings, *, validate: bool = True) -> FastAPI:
         store.audit("delete", f"{user.login}: {doc_id} ({doc.title})")
         return _back(request, "/", {"ok": True})
 
+    # -------------------------------------------------------------- feeds
+    @app.get("/feeds", response_class=HTMLResponse)
+    def feeds_page(
+        request: Request,
+        feed: int | None = None,
+        status: str = "",
+        user: User = Depends(require_user),
+    ):
+        entries = jobs.feeds.entries(feed, status=status or None, limit=200)
+        return render(
+            request,
+            "feeds.html",
+            user,
+            feeds=jobs.feeds.list(),
+            entries=entries,
+            feed=feed,
+            status=status,
+        )
+
+    @app.post("/feeds/add")
+    def feeds_add(
+        request: Request,
+        csrf: str = Form(""),
+        kind: str = Form("rss"),
+        name: str = Form(""),
+        query: str = Form(""),
+        auto_stage: str = Form(""),
+        user: User = Depends(require_user),
+    ):
+        csrf_check(request, user, csrf)
+        query = query.strip()
+        if not query:
+            raise HTTPException(400, "feed URL or query required")
+        if kind == "rss" and not query.startswith(("http://", "https://")):
+            raise HTTPException(400, "RSS feeds need an http(s) URL")
+        try:
+            fid = jobs.feeds.add(
+                kind, name.strip() or query[:80], query, auto_stage=auto_stage == "yes"
+            )
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        store.audit("feed.add", f"{user.login}: {kind} {query[:80]}")
+        return _back(request, "/feeds", {"ok": True, "id": fid})
+
+    @app.post("/feeds/{fid}/remove")
+    def feeds_remove(
+        request: Request, fid: int, csrf: str = Form(""), user: User = Depends(require_user)
+    ):
+        csrf_check(request, user, csrf)
+        jobs.feeds.remove(fid)
+        return _back(request, "/feeds", {"ok": True})
+
+    @app.post("/feeds/poll")
+    def feeds_poll(
+        request: Request,
+        csrf: str = Form(""),
+        fid: int | None = Form(None),
+        user: User = Depends(require_user),
+    ):
+        csrf_check(request, user, csrf)
+        counts = jobs.poll_feeds(fid)
+        store.audit("feed.poll", f"{user.login}: {counts}")
+        return _back(request, "/feeds", {"ok": True, "new": counts})
+
+    @app.post("/feeds/entry/{eid}/stage")
+    def feeds_stage(
+        request: Request,
+        eid: int,
+        csrf: str = Form(""),
+        summarize: str = Form(""),
+        user: User = Depends(require_user),
+    ):
+        csrf_check(request, user, csrf)
+        try:
+            out = jobs.stage_entry(eid, summarize=(summarize == "yes") or None)
+        except KeyError as exc:
+            raise HTTPException(404) from exc
+        return _back(request, "/feeds", out)
+
+    @app.post("/feeds/stage-new")
+    def feeds_stage_new(
+        request: Request,
+        csrf: str = Form(""),
+        fid: int | None = Form(None),
+        user: User = Depends(require_user),
+    ):
+        csrf_check(request, user, csrf)
+        n = 0
+        for e in jobs.feeds.entries(fid, status="new", limit=100):
+            jobs.pool.submit(jobs._safe_stage, e["id"])  # noqa: SLF001
+            n += 1
+        return _back(request, "/feeds", {"ok": True, "queued": n})
+
+    @app.get("/api/feeds")
+    def api_feeds(user: User = Depends(require_user)):
+        return {"feeds": jobs.feeds.list(), "entries": jobs.feeds.entries(limit=100)}
+
+    # -------------------------------------------------------------- zotero
+    @app.get("/zotero", response_class=HTMLResponse)
+    def zotero_page(request: Request, user: User = Depends(require_user)):
+        z = jobs.zotero_factory()
+        try:
+            ok = z.available()
+            cols = z.collections() if ok else []
+        finally:
+            z.close()
+        return render(request, "zotero.html", user, available=ok, collections=cols)
+
+    @app.post("/zotero/import")
+    def zotero_import(
+        request: Request,
+        csrf: str = Form(""),
+        collection: str = Form(""),
+        ocr: str = Form(""),
+        user: User = Depends(require_user),
+    ):
+        csrf_check(request, user, csrf)
+        bid = jobs.import_zotero(collection.strip() or None, extract=_extract_for(settings, ocr))
+        store.audit("zotero.import", f"{user.login}: {collection or 'library'} -> {bid}")
+        return _back(request, "/", {"ok": True, "batch": bid})
+
     # -------------------------------------------------------------- summaries / ask
     def _summary_json(doc) -> dict | None:
         p = doc.dir / "summary.json"

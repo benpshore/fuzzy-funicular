@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% block title %}Feeds · Funicular{% endblock %}
+{% block content %}
+<h1 class="h1">Feeds</h1>
+<p class="muted">Journal RSS, arXiv queries and PubMed searches. New articles can be staged: the open-access PDF is fetched, extracted, indexed, its record verified and, with an LLM configured, an evidence card written before you open it. <a href="/zotero">Zotero import</a> is on its own page.</p>
+
+<form class="card stack" method="post" action="/feeds/add">
+  <input type="hidden" name="csrf" value="{{ user.csrf }}">
+  <fieldset class="row"><legend class="label">Kind</legend>
+    <label class="choice"><input type="radio" name="kind" value="rss" checked> RSS / Atom URL</label>
+    <label class="choice"><input type="radio" name="kind" value="arxiv"> arXiv query</label>
+    <label class="choice"><input type="radio" name="kind" value="pubmed"> PubMed query</label>
+  </fieldset>
+  <label class="label" for="query">URL or query</label>
+  <input class="input" id="query" name="query" required placeholder="https://www.nature.com/nrneurol.rss · cat:q-bio.NC AND all:motor neuron · (riluzole[tiab]) AND 2026[dp]">
+  <label class="label" for="name">Name (optional)</label>
+  <input class="input" id="name" name="name" maxlength="120">
+  <label class="choice"><input type="checkbox" name="auto_stage" value="yes"> Stage new articles automatically after each poll</label>
+  <button class="btn btn-primary" type="submit">Add feed</button>
+</form>
+
+<section class="card" aria-labelledby="fl-h">
+  <h2 id="fl-h" class="h2">Subscriptions</h2>
+  {% if feeds %}
+  <ul class="list plain">
+    {% for f in feeds %}
+    <li class="row-between">
+      <span><a href="/feeds?feed={{ f.id }}"><strong>{{ f.name }}</strong></a> <span class="muted small">{{ f.kind }} · {{ f.entries }} entries, {{ f.new }} new · {{ f.last_status or 'never polled' }}</span></span>
+      <span class="chips">
+        <form method="post" action="/feeds/poll"><input type="hidden" name="csrf" value="{{ user.csrf }}"><input type="hidden" name="fid" value="{{ f.id }}"><button class="btn btn-quiet" type="submit">Poll</button></form>
+        <form method="post" action="/feeds/stage-new"><input type="hidden" name="csrf" value="{{ user.csrf }}"><input type="hidden" name="fid" value="{{ f.id }}"><button class="btn btn-quiet" type="submit">Stage new</button></form>
+        <form method="post" action="/feeds/{{ f.id }}/remove" data-confirm><input type="hidden" name="csrf" value="{{ user.csrf }}"><label class="choice small"><input type="checkbox" name="confirm" value="yes" required> remove</label><button class="btn btn-quiet" type="submit">Remove</button></form>
+      </span>
+    </li>
+    {% endfor %}
+  </ul>
+  <form method="post" action="/feeds/poll" class="chips"><input type="hidden" name="csrf" value="{{ user.csrf }}"><button class="btn btn-secondary" type="submit">Poll all</button></form>
+  {% else %}<p class="muted">No feeds yet.</p>{% endif %}
+</section>
+
+<section class="card" aria-labelledby="en-h">
+  <h2 id="en-h" class="h2">Articles{% if feed %} in this feed{% endif %}</h2>
+  <nav class="chips" aria-label="Filter">
+    {% for st in ['', 'new', 'staged', 'skipped', 'failed'] %}<a class="chip {% if status == st %}chip-on{% endif %}" href="/feeds?{% if feed %}feed={{ feed }}&{% endif %}status={{ st }}">{{ st or 'all' }}</a>{% endfor %}
+  </nav>
+  <ul class="list">
+    {% for e in entries %}
+    <li class="row-item">
+      <span class="pick"></span>
+      <div class="row-link">
+        <span class="row-main">
+          <span class="row-title">{% if e.doc_id %}<a href="/doc/{{ e.doc_id }}">{{ e.title }}</a>{% else %}{{ e.title }}{% endif %}</span>
+          <span class="row-sub muted">{{ e.feed_name }} · {{ e.published }}{% if e.doi %} · doi:{{ e.doi }}{% endif %}{% if e.arxiv %} · arXiv:{{ e.arxiv }}{% endif %} · <span class="badge {% if e.status == 'staged' %}badge-ok{% elif e.status in ('failed',) %}badge-bad{% endif %}">{{ e.status }}</span>{% if e.note %} · {{ e.note[:80] }}{% endif %}</span>
+          {% if e.summary %}<span class="snippet">{{ e.summary[:300] }}</span>{% endif %}
+        </span>
+        {% if e.status in ('new', 'skipped', 'failed') %}
+        <form method="post" action="/feeds/entry/{{ e.id }}/stage"><input type="hidden" name="csrf" value="{{ user.csrf }}"><button class="btn btn-secondary" type="submit">Stage</button></form>
+        {% endif %}
+        {% if e.link %}<a class="btn btn-quiet" href="{{ e.link }}" rel="noreferrer">Source</a>{% endif %}
+      </div>
+    </li>
+    {% else %}<li class="card empty">No articles yet. Add a feed and poll it.</li>{% endfor %}
+  </ul>
+</section>
+{% endblock %}

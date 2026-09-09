@@ -400,10 +400,8 @@ def summarize(
     if out:
         out.write_text(json.dumps(summary.to_dict(), ensure_ascii=False, indent=1))
     console.print_json(json.dumps(summary.card, ensure_ascii=False))
-    err.print(
-        f"{summary.provider}/{summary.model}: {summary.input_tokens}+{summary.output_tokens} tokens, "
-        f"{summary.seconds:.0f}s"
-    )
+    toks = f"{summary.input_tokens}+{summary.output_tokens}"
+    err.print(f"{summary.provider}/{summary.model}: {toks} tokens, {summary.seconds:.0f}s")
 
 
 @app.command()
@@ -438,6 +436,119 @@ def ask(
     a = _ask(question, passages, prov)
     console.print(a.text)
     err.print(f"[dim]{a.provider}/{a.model}, {len(a.citations)} passages, {a.seconds:.1f}s")
+
+
+@app.command()
+def mcp(
+    http: Annotated[
+        int, typer.Option(help="Serve streamable HTTP on this loopback port instead of stdio")
+    ] = 0,
+) -> None:
+    """MCP server for Claude Desktop / ChatGPT: search, read, summaries, records, ask."""
+    from .mcp_server import run as _run
+
+    _run("streamable-http" if http else "stdio", port=http or 8788)
+
+
+feeds_app = typer.Typer(help="Scholarly feeds: subscribe, poll, stage open-access PDFs.")
+app.add_typer(feeds_app, name="feeds")
+
+
+def _jobs():
+    from .web.jobs import JobManager
+    from .web.store import Store
+
+    settings = Settings.from_env()
+    settings.data_dir.mkdir(parents=True, exist_ok=True)
+    return JobManager(settings, Store(settings.data_dir / "funicular.sqlite3"))
+
+
+@feeds_app.command("add")
+def feeds_add_cmd(
+    query: Annotated[str, typer.Argument(help="RSS URL, arXiv query or PubMed query")],
+    kind: Annotated[str, typer.Option(help="rss | arxiv | pubmed")] = "rss",
+    name: Annotated[str, typer.Option()] = "",
+    auto_stage: Annotated[bool, typer.Option(help="Stage new entries after each poll")] = False,
+) -> None:
+    j = _jobs()
+    fid = j.feeds.add(kind, name or query[:80], query, auto_stage=auto_stage)
+    console.print(f"added feed {fid}")
+
+
+@feeds_app.command("list")
+def feeds_list_cmd() -> None:
+    j = _jobs()
+    table = Table(title="feeds")
+    for col in ("id", "kind", "name", "entries", "new", "last"):
+        table.add_column(col)
+    for f in j.feeds.list():
+        table.add_row(
+            str(f["id"]), f["kind"], f["name"], str(f["entries"]), str(f["new"]), f["last_status"]
+        )
+    console.print(table)
+
+
+@feeds_app.command("poll")
+def feeds_poll_cmd(feed_id: Annotated[int | None, typer.Argument()] = None) -> None:
+    j = _jobs()
+    counts = j.poll_feeds(feed_id)
+    for fid, n in counts.items():
+        console.print(f"feed {fid}: {n} new")
+
+
+@feeds_app.command("stage")
+def feeds_stage_cmd(
+    entry_id: Annotated[
+        int | None, typer.Argument(help="entry id; omit to stage every new entry")
+    ] = None,
+    summarize: Annotated[bool, typer.Option()] = False,
+) -> None:
+    """Fetch the open-access PDF and import it. Extraction runs in this process until done."""
+    j = _jobs()
+    ids = [entry_id] if entry_id else [e["id"] for e in j.feeds.entries(status="new", limit=100)]
+    for eid in ids:
+        console.print(f"{eid}: {j.stage_entry(eid, summarize=summarize)}")
+    import time as _t
+
+    while j.active_ids():
+        _t.sleep(1)
+    j.stop("cli done")
+
+
+zotero_app = typer.Typer(help="Zotero (local API): list collections, import PDFs.")
+app.add_typer(zotero_app, name="zotero")
+
+
+@zotero_app.command("collections")
+def zotero_collections_cmd() -> None:
+    from .zotero import ZoteroLocal
+
+    z = ZoteroLocal()
+    if not z.available():
+        err.print("[red]Zotero local API not reachable (enable it in Zotero → Settings → Advanced)")
+        raise typer.Exit(code=1)
+    for c in z.collections():
+        console.print(f"{c['key']}  {c['name']}  ({c['items']})")
+
+
+@zotero_app.command("import")
+def zotero_import_cmd(
+    collection: Annotated[
+        str, typer.Option(help="collection key; omit for the whole library")
+    ] = "",
+    ocr: Annotated[str, typer.Option()] = "off",
+) -> None:
+    j = _jobs()
+    bid = j.import_zotero(collection or None, extract=ExtractSettings(ocr=ocr))  # type: ignore[arg-type]
+    import time as _t
+
+    while j.contexts():
+        _t.sleep(1)
+    b = j.store.get_batch(bid) or {}
+    console.print(
+        f"batch {bid}: {b.get('status')} imported={b.get('imported')} skipped={b.get('skipped')}"
+    )
+    j.stop("cli done")
 
 
 models_app = typer.Typer(help="Pre-fetch and inspect ML models (docling, Whisper, embeddings).")

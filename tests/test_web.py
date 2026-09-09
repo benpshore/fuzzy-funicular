@@ -869,3 +869,102 @@ def test_ask_without_provider_is_503(client, monkeypatch):
         "/ask", data={"csrf": csrf, "question": "anything"}, headers={"Accept": "application/json"}
     )
     assert r.status_code == 503 and "no LLM" in r.json()["error"]
+
+
+def test_feeds_and_zotero_pages(client, fixtures, tmp_path):
+    import httpx
+
+    from funicular import zotero as zmod
+    from funicular.scholar import clients as sc
+    from test_feeds_zotero_mcp import RSS, zotero_transport
+
+    pdf = fixtures["scholarly"].read_bytes()
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.host == "feed.example":
+            return httpx.Response(200, text=RSS)
+        if req.url.host == "arxiv.org":
+            return httpx.Response(200, content=pdf)
+        if req.url.host == "api.unpaywall.org":
+            return httpx.Response(404)
+        if req.url.host == "api.openalex.org":
+            return httpx.Response(404)
+        return httpx.Response(404)
+
+    transport = httpx.MockTransport(handler)
+    jobs = client.app.state.jobs
+    jobs.feed_transport = transport
+
+    def fetcher_factory():
+        f = sc.Fetcher(transport=transport)
+        f.MIN_INTERVAL = {}
+        return f
+
+    jobs.fetcher_factory = fetcher_factory
+    csrf = sign_in(client)
+    r = client.post(
+        "/feeds/add",
+        data={"csrf": csrf, "kind": "rss", "name": "J", "query": "https://feed.example/rss"},
+        headers={"Accept": "application/json"},
+    )
+    fid = r.json()["id"]
+    r = client.post(
+        "/feeds/poll", data={"csrf": csrf, "fid": str(fid)}, headers={"Accept": "application/json"}
+    )
+    assert r.json()["new"][str(fid)] == 2
+    r = client.get("/feeds")
+    assert "Preprint on ALS" in r.text and "Stage" in r.text
+    entries = client.get("/api/feeds").json()["entries"]
+    arx = next(e for e in entries if e["arxiv"])
+    r = client.post(
+        f"/feeds/entry/{arx['id']}/stage",
+        data={"csrf": csrf},
+        headers={"Accept": "application/json"},
+    )
+    out = r.json()
+    assert out["status"] == "staged" and out["doc_id"]
+    wait_done(client, out["doc_id"])
+    d = client.get(f"/api/docs/{out['doc_id']}").json()
+    assert "feed:J" in d["tags"] and d["original_name"].startswith("Preprint on ALS")
+    doi_entry = next(e for e in entries if e["doi"])
+    r = client.post(
+        f"/feeds/entry/{doi_entry['id']}/stage",
+        data={"csrf": csrf},
+        headers={"Accept": "application/json"},
+    )
+    assert r.json()["status"] == "skipped"
+    r = client.post(
+        "/feeds/add",
+        data={"csrf": csrf, "kind": "rss", "query": "not a url"},
+        headers={"Accept": "application/json"},
+    )
+    assert r.status_code == 400
+    # zotero
+    jobs.zotero_factory = lambda: zmod.ZoteroLocal(
+        storage=tmp_path / "zs", transport=zotero_transport(False)
+    )
+    r = client.get("/zotero")
+    assert r.status_code == 200 and "MND" in r.text
+    (tmp_path / "zs" / "A1").mkdir(parents=True)
+    (tmp_path / "zs" / "A1" / "paper.pdf").write_bytes(
+        fixtures["mixed"].read_bytes()
+    )  # distinct bytes
+    r = client.post(
+        "/zotero/import",
+        data={"csrf": csrf, "collection": "C1"},
+        headers={"Accept": "application/json"},
+    )
+    b = wait_batch(client, r.json()["batch"])
+    assert b["status"] == "done" and b["imported"] == 1, b
+    docs = client.get("/api/docs").json()["docs"]
+    z = next(d for d in docs if "zotero" in d["tags"])
+    assert (
+        z["title"] == "Riluzole registry"
+        and "zotero:MND" in z["tags"]
+        and "doi:10.1000/abc.1" in z["tags"]
+    )
+    wait_done(client, z["id"])
+    r = client.post(
+        f"/feeds/{fid}/remove", data={"csrf": csrf}, headers={"Accept": "application/json"}
+    )
+    assert r.status_code == 200 and client.get("/api/feeds").json()["feeds"] == []

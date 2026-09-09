@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block title %}Zotero · Funicular{% endblock %}
+{% block content %}
+<p><a class="back" href="/feeds">‹ Feeds</a></p>
+<h1 class="h1">Zotero</h1>
+{% if available %}
+<p class="muted">Zotero is running with its local API enabled. Importing copies each item's PDF attachment into the library with the item's title, tags and collections; Zotero itself is never modified.</p>
+<form class="card stack" method="post" action="/zotero/import">
+  <input type="hidden" name="csrf" value="{{ user.csrf }}">
+  <label class="label" for="collection">Collection</label>
+  <select class="input" id="collection" name="collection">
+    <option value="">Whole library</option>
+    {% for c in collections %}<option value="{{ c.key }}">{{ c.name }} ({{ c.items }})</option>{% endfor %}
+  </select>
+  <fieldset class="row"><legend class="label">OCR</legend>
+    <label class="choice"><input type="radio" name="ocr" value="off" checked> Off</label>
+    <label class="choice"><input type="radio" name="ocr" value="auto"> Only where needed</label>
+  </fieldset>
+  <button class="btn btn-primary" type="submit">Import into Funicular</button>
+</form>
+{% else %}
+<div class="card stack">
+  <p>Zotero's local API is not reachable on <code>127.0.0.1:23119</code>.</p>
+  <p class="muted">Open Zotero → Settings → Advanced → tick “Allow other applications on this computer to communicate with Zotero”, then reload this page.</p>
+</div>
+{% endif %}
+{% endblock %}
