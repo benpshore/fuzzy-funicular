@@ -222,3 +222,7 @@ fieldset.row { border: 0; padding: 0; margin: 0; display: flex; flex-wrap: wrap;
 .answer { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.5; }
 .chip-ok { border: 1px solid var(--accent); }
 textarea.input { min-height: 96px; resize: vertical; font-family: var(--font); }
+
+#graph-canvas { width: 100%; height: auto; background: var(--card); border-radius: 12px; touch-action: manipulation; }
+#graph-canvas:focus-visible { outline: 3px solid var(--accent); }
+.graph-tools { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 10px; }

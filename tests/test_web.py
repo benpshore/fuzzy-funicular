@@ -968,3 +968,53 @@ def test_feeds_and_zotero_pages(client, fixtures, tmp_path):
         f"/feeds/{fid}/remove", data={"csrf": csrf}, headers={"Accept": "application/json"}
     )
     assert r.status_code == 200 and client.get("/api/feeds").json()["feeds"] == []
+
+
+def test_graph_page_and_build(client, fixtures, tmp_path):
+    import httpx
+
+    from funicular.scholar import clients as sc
+    from test_graph import handler as graph_handler
+
+    jobs = client.app.state.jobs
+    csrf = sign_in(client)
+    r = client.get("/graph")
+    assert r.status_code == 200 and "Build graph" in r.text
+    r = client.post("/graph/build", data={"csrf": csrf}, headers={"Accept": "application/json"})
+    assert r.status_code == 400  # nothing verified yet
+    # seed: a finished doc with a scholar.json carrying a DOI
+    r = client.post(
+        "/upload",
+        files=[("files", ("s.pdf", fixtures["scholarly"].read_bytes(), "application/pdf"))],
+        data={"csrf": csrf},
+        headers={"Accept": "application/json"},
+    )
+    doc_id = r.json()["created"][0]["id"]
+    wait_done(client, doc_id)
+    doc = client.app.state.store.get(doc_id)
+    (doc.dir / "scholar.json").write_text(
+        json.dumps(
+            {
+                "resolution": {
+                    "verified": True,
+                    "work": {
+                        "doi": "10.1000/seed",
+                        "title": "Seed paper",
+                        "year": 2020,
+                        "cited_by": 3,
+                    },
+                }
+            }
+        )
+    )
+    jobs.fetcher_factory = lambda: sc.Fetcher(transport=httpx.MockTransport(graph_handler))
+    r = client.post(
+        "/graph/build",
+        data={"csrf": csrf, "max_nodes": "40"},
+        headers={"Accept": "application/json"},
+    )
+    g = r.json()
+    assert len(g["nodes"]) >= 4 and any(n["doc_id"] == doc_id for n in g["nodes"])
+    r = client.get("/graph")
+    assert r.status_code == 200 and "Seed paper" in r.text and "graph-canvas" in r.text
+    assert client.get("/api/graph").json()["nodes"]

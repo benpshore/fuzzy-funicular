@@ -700,6 +700,73 @@ def create_app(settings: Settings, *, validate: bool = True) -> FastAPI:
         store.audit("delete", f"{user.login}: {doc_id} ({doc.title})")
         return _back(request, "/", {"ok": True})
 
+    # -------------------------------------------------------------- literature graph
+    def _graph_seeds(ids: list[str] | None) -> list[dict]:
+        seeds = []
+        docs = [store.get(i) for i in ids] if ids else store.list(limit=300)
+        for d in docs:
+            if not d or d.kind != "pdf":
+                continue
+            sj = _scholar_json(d) or {}
+            w = (sj.get("resolution") or {}).get("work") or {}
+            if not (w.get("doi") or w.get("s2_id")):
+                continue
+            seeds.append(
+                {
+                    "doc_id": d.id,
+                    "doi": w.get("doi"),
+                    "s2_id": w.get("s2_id"),
+                    "title": w.get("title") or d.title,
+                    "year": w.get("year"),
+                    "cited_by": w.get("cited_by"),
+                }
+            )
+        return seeds
+
+    @app.get("/graph", response_class=HTMLResponse)
+    def graph_page(request: Request, user: User = Depends(require_user)):
+        cached = settings.data_dir / "graph.json"
+        data = None
+        if cached.is_file():
+            try:
+                data = json.loads(cached.read_text())
+            except OSError, ValueError:
+                data = None
+        return render(request, "graph.html", user, graph=data, seeds=len(_graph_seeds(None)))
+
+    @app.post("/graph/build")
+    def graph_build(
+        request: Request,
+        csrf: str = Form(""),
+        ids: list[str] = Form([]),
+        max_nodes: int = Form(40),
+        user: User = Depends(require_user),
+    ):
+        csrf_check(request, user, csrf)
+        from ..embeddings import get_embedder
+        from ..graph import build_graph
+
+        seeds = _graph_seeds([i for i in ids if i] or None)
+        if not seeds:
+            raise HTTPException(400, "no documents with a verified DOI yet; verify records first")
+        f = jobs.fetcher_factory()
+        try:
+            emb = get_embedder(settings.embeddings) if settings.embeddings != "none" else None
+            g = build_graph(seeds[:20], f, max_nodes=max(5, min(max_nodes, 120)), embedder=emb)
+        finally:
+            f.close()
+        data = g.to_dict()
+        (settings.data_dir / "graph.json").write_text(json.dumps(data))
+        store.audit("graph.build", f"{user.login}: {len(g.nodes)} nodes from {len(seeds)} seeds")
+        return _back(request, "/graph", data)
+
+    @app.get("/api/graph")
+    def api_graph(user: User = Depends(require_user)):
+        cached = settings.data_dir / "graph.json"
+        if not cached.is_file():
+            return {"nodes": [], "edges": []}
+        return json.loads(cached.read_text())
+
     # -------------------------------------------------------------- feeds
     @app.get("/feeds", response_class=HTMLResponse)
     def feeds_page(

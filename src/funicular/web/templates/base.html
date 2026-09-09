@@ -32,6 +32,7 @@
       <a href="/search" {% if request.url.path == '/search' %}aria-current="page"{% endif %}>Search</a>
       <a href="/ask" {% if request.url.path == '/ask' %}aria-current="page"{% endif %}>Ask</a>
       <a href="/feeds" {% if request.url.path == '/feeds' %}aria-current="page"{% endif %}>Feeds</a>
+      <a href="/graph" {% if request.url.path == '/graph' %}aria-current="page"{% endif %}>Graph</a>
       <a href="/system" {% if request.url.path == '/system' %}aria-current="page"{% endif %}>System</a>
     </nav>
     <form class="signout" method="post" action="/auth/logout">
