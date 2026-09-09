@@ -17,6 +17,18 @@ from .config import Settings
 from .search import SearchIndex
 from .web.store import Store
 
+D_1 = (
+    "Full-text, jargon-tolerant and semantic search over the library. Returns passages wit"
+    "h doc_id and page."
+)
+D_2 = (
+    "Extracted text of a document: view = layout | markdown | text. Long documents are ret"
+    "urned in full unless max_chars is set."
+)
+D_3 = "Evidence card (structured summary) for a document, if one has been written."
+D_4 = "Verified bibliographic record (DOI, authors, journal, citations, open-access link)."
+D_5 = "Grounded answer from the library using the configured LLM provider; cites [doc_id p.N]."
+
 
 def build_server(settings: Settings | None = None):
     from mcp.server.mcpserver import MCPServer
@@ -33,9 +45,7 @@ def build_server(settings: Settings | None = None):
         ),
     )
 
-    @server.tool(
-        description="Full-text, jargon-tolerant and semantic search over the library. Returns passages with doc_id and page."
-    )
+    @server.tool(description=D_1)
     def search(query: str, limit: int = 10, mode: str = "auto") -> list[dict[str, Any]]:
         hits, info = index.search(query, limit=max(1, min(limit, 50)), mode=mode)
         return [h.to_dict() for h in hits]
@@ -44,9 +54,7 @@ def build_server(settings: Settings | None = None):
     def list_documents(limit: int = 50, tag: str | None = None) -> list[dict[str, Any]]:
         return [d.to_public() for d in store.list(limit=max(1, min(limit, 500)), tag=tag)]
 
-    @server.tool(
-        description="Extracted text of a document: view = layout | markdown | text. Long documents are returned in full unless max_chars is set."
-    )
+    @server.tool(description=D_2)
     def get_document(doc_id: str, view: str = "markdown", max_chars: int = 0) -> dict[str, Any]:
         doc = store.get(doc_id)
         if not doc:
@@ -66,15 +74,11 @@ def build_server(settings: Settings | None = None):
                 }
         return {"doc_id": doc.id, "title": doc.title, "error": "no text extracted yet"}
 
-    @server.tool(
-        description="Evidence card (structured summary) for a document, if one has been written."
-    )
+    @server.tool(description=D_3)
     def get_summary(doc_id: str) -> dict[str, Any]:
         return _json_output(store, doc_id, "summary.json")
 
-    @server.tool(
-        description="Verified bibliographic record (DOI, authors, journal, citations, open-access link)."
-    )
+    @server.tool(description=D_4)
     def get_scholar(doc_id: str) -> dict[str, Any]:
         return _json_output(store, doc_id, "scholar.json")
 
@@ -82,9 +86,7 @@ def build_server(settings: Settings | None = None):
     def get_references(doc_id: str) -> dict[str, Any]:
         return _json_output(store, doc_id, "references.json")
 
-    @server.tool(
-        description="Grounded answer from the library using the configured LLM provider; cites [doc_id p.N]."
-    )
+    @server.tool(description=D_5)
     def ask(
         question: str, doc_id: str | None = None, provider: str | None = None
     ) -> dict[str, Any]:
