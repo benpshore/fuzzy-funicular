@@ -317,9 +317,39 @@ def create_app(settings: Settings, *, validate: bool = True) -> FastAPI:
         )
 
     @app.get("/search", response_class=HTMLResponse)
-    def search(request: Request, q: str = "", user: User = Depends(require_user)):
-        results = store.search(q) if q.strip() else []
-        return render(request, "search.html", user, q=q, results=results)
+    def search(
+        request: Request, q: str = "", mode: str = "auto", user: User = Depends(require_user)
+    ):
+        hits, info = ([], None)
+        results = []
+        if q.strip():
+            hits, info = jobs.index.search(
+                q, mode=mode if mode in ("auto", "keyword", "semantic") else "auto"
+            )
+            ids = list({h.doc_id for h in hits})
+            docs = {d.id: d for d in (store.get(i) for i in ids) if d}
+            results = [(docs[h.doc_id], h) for h in hits if h.doc_id in docs]
+            if not results:  # titles/tags live in the document store, not the chunk index
+                results = [(d, None) for d, _snip in store.search(q)]
+        return render(
+            request,
+            "search.html",
+            user,
+            q=q,
+            mode=mode,
+            results=results,
+            info=info.to_dict() if info else None,
+            stats=jobs.index.stats(),
+        )
+
+    @app.get("/api/search")
+    def api_search(
+        q: str = "", mode: str = "auto", limit: int = 20, user: User = Depends(require_user)
+    ):
+        if not q.strip():
+            return {"hits": [], "info": None}
+        hits, info = jobs.index.search(q, mode=mode, limit=max(1, min(limit, 100)))
+        return {"hits": [h.to_dict() for h in hits], "info": info.to_dict()}
 
     @app.get("/doc/{doc_id}", response_class=HTMLResponse)
     def doc_page(
@@ -629,6 +659,11 @@ def create_app(settings: Settings, *, validate: bool = True) -> FastAPI:
         if not title:
             raise HTTPException(400, "title required")
         store.rename(doc_id, title)
+        try:
+            with jobs.index._conn() as c:  # noqa: SLF001 - keep the index title in step
+                c.execute("UPDATE docs SET title=? WHERE doc_id=?", (title, doc_id))
+        except Exception as exc:  # noqa: BLE001
+            log.debug("index title update failed: %s", exc)
         return _back(request, f"/doc/{doc_id}", {"ok": True, "title": title})
 
     @app.post("/doc/{doc_id}/delete")
@@ -645,9 +680,10 @@ def create_app(settings: Settings, *, validate: bool = True) -> FastAPI:
             raise HTTPException(404)
         if confirm != "yes":
             raise HTTPException(400, "confirmation required")
-        if doc_id in jobs.active_ids():
-            raise HTTPException(409, "still processing; try again when it finishes")
+        if doc.status in ("queued", "running"):
+            raise HTTPException(409, "still processing; cancel it first or wait")
         store.delete(doc_id)
+        jobs.index.remove_document(doc_id)
         import shutil
 
         shutil.rmtree(doc.dir, ignore_errors=True)

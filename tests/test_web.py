@@ -33,6 +33,7 @@ def make_settings(tmp_path: Path, **over) -> Settings:
         github_client_secret="secret",
         allowed_github_ids=frozenset({ALLOWED_ID}),
         workers=1,
+        embeddings="none",  # keep tests offline and fast; semantic search has its own test
     )
     base.update(over)
     return Settings(**base)
@@ -314,8 +315,13 @@ def test_upload_process_view_download_search_delete(client, fixtures, tmp_path):
     r = client.get('/search?q=" OR 1=1 --')
     assert r.status_code == 200
 
-    # archive copy exists (iCloud folder stand-in)
-    files = [p.name for p in (tmp_path / "archive").rglob("*") if p.is_file()]
+    # archive copy appears shortly after "done" (it is written by a post-finish step)
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        files = [p.name for p in (tmp_path / "archive").rglob("*") if p.is_file()]
+        if any(n.endswith(".layout.txt") for n in files) and "scholarly.pdf" in files:
+            break
+        time.sleep(0.2)
     assert any(n.endswith(".layout.txt") for n in files) and "scholarly.pdf" in files
 
     # duplicate upload is flagged
@@ -686,3 +692,30 @@ def test_auto_tags_are_generated(client, fixtures):
     tags = [t.lower() for t in d["tags"]]
     assert "pdf" in tags and any("riluzole" in t for t in tags)
     assert not d["needs_ocr"] and "scanned" not in tags
+
+
+def test_search_page_and_api_use_the_chunk_index(client, fixtures):
+    csrf = sign_in(client)
+    r = client.post(
+        "/upload",
+        files=[("files", ("s.pdf", fixtures["scholarly"].read_bytes(), "application/pdf"))],
+        data={"csrf": csrf},
+        headers={"Accept": "application/json"},
+    )
+    doc_id = r.json()["created"][0]["id"]
+    wait_done(client, doc_id)
+    r = client.get("/api/search?q=rilusole")  # misspelt: phonetic expansion
+    body = r.json()
+    assert body["hits"] and body["hits"][0]["doc_id"] == doc_id
+    assert body["info"]["expansions"].get("rilusole") == ["riluzole"]
+    r = client.get("/search?q=chio prognostic")
+    assert r.status_code == 200 and "[Chiò]" in r.text and "page" in r.text
+    r = client.get("/search?q=ALSFRS&mode=keyword")
+    assert doc_id in r.text
+    r = client.post(
+        f"/doc/{doc_id}/delete",
+        data={"csrf": csrf, "confirm": "yes"},
+        headers={"Accept": "application/json"},
+    )
+    assert r.status_code == 200
+    assert client.get("/api/search?q=riluzole").json()["hits"] == []
