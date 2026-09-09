@@ -20,9 +20,32 @@
     </fieldset>
     <button class="btn btn-secondary" type="submit" id="upload-submit">Upload</button>
     <p id="upload-status" class="status" role="status" aria-live="polite"></p>
-    <p class="muted small">Drop files here or in the iCloud folder <code>{{ settings.inbox_dir.name }}</code>. Up to {{ settings.max_upload_mb }} MB each.</p>
+    <p class="muted small">Drop files here or in the iCloud folder <code>{{ settings.inbox_dir.name }}</code>. Zip and tar archives are unpacked, nested folders included. Up to {{ settings.max_upload_mb }} MB each.</p>
   </form>
+  <p><a class="btn btn-secondary" href="/browse">Browse folders on this Mac…</a></p>
 </section>
+
+<section class="card" aria-labelledby="batches-h" id="batches" {% if not batches %}hidden{% endif %}>
+  <h2 id="batches-h" class="h2">Folder and archive imports</h2>
+  <ul class="list plain" id="batch-list">
+    {% for b in batches %}
+    <li class="batch-item status-{{ b.status }}" data-batch-id="{{ b.id }}">
+      <div class="row-between"><span class="row-title">{{ icon('archive' if b.kind == 'archive' else 'folder') }} {{ b.source|basename }}</span>
+        <span class="badge {% if b.status == 'done' %}badge-ok{% elif b.status == 'failed' %}badge-bad{% endif %}" data-role="status">{{ b.status|capitalize }}</span></div>
+      <div class="progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="{{ (100 * b.done / b.total)|int if b.total else 0 }}" aria-label="Import progress" {% if b.status in ('done','failed') %}hidden{% endif %}><div class="bar" style="width: {{ (100 * b.done / b.total) if b.total else 0 }}%"></div></div>
+      <p class="row-stage muted small" aria-live="polite" data-role="detail">{{ b.done }}/{{ b.total }} · {{ b.imported }} imported · {{ b.skipped }} skipped{% if b.errors %} · {{ b.errors|length }} error(s){% endif %}</p>
+      {% if b.status in ('queued','running') %}<form method="post" action="/batch/{{ b.id }}/cancel"><input type="hidden" name="csrf" value="{{ user.csrf }}"><button class="btn btn-quiet" type="submit">Cancel</button></form>{% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+</section>
+<template id="batch-row-template">
+  <li class="batch-item" data-batch-id="">
+    <div class="row-between"><span class="row-title"></span><span class="badge" data-role="status"></span></div>
+    <div class="progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-label="Import progress"><div class="bar"></div></div>
+    <p class="row-stage muted small" aria-live="polite" data-role="detail"></p>
+  </li>
+</template>
 
 {% if tags %}
 <nav class="chips" aria-label="Tags">
@@ -35,17 +58,29 @@
 
 <section aria-labelledby="docs-h">
   <h2 id="docs-h" class="h2 vh">Documents</h2>
-  <ul class="list" id="doc-list">
-    {% for d in docs %}
-    {% include "_doc_row.html" %}
-    {% else %}
-    <li class="card empty">No documents yet. Upload one above, or drop a file in your iCloud inbox.</li>
-    {% endfor %}
-  </ul>
+  <form method="post" action="/export" id="export-form">
+    <input type="hidden" name="csrf" value="{{ user.csrf }}">
+    <ul class="list" id="doc-list">
+      {% for d in docs %}
+      {% include "_doc_row.html" %}
+      {% else %}
+      <li class="card empty">No documents yet. Upload one above, or drop a file in your iCloud inbox.</li>
+      {% endfor %}
+    </ul>
+    {% if docs %}
+    <div class="export-bar">
+      <label class="choice"><input type="checkbox" id="select-all"> Select all</label>
+      <label class="label vh" for="what">What to export</label>
+      <select class="input select" id="what" name="what"><option value="all">Everything</option><option value="text">Text outputs only</option><option value="originals">Originals only</option></select>
+      <button class="btn btn-secondary" type="submit">Export selected as .tar.gz</button>
+    </div>
+    {% endif %}
+  </form>
 </section>
 
 <template id="doc-row-template">
   <li class="row-item" data-doc-id="">
+    <label class="pick"><input type="checkbox" name="ids" value="" aria-label="Select"></label>
     <a class="row-link" href="#">
       <span class="row-main">
         <span class="row-title"></span>

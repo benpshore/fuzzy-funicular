@@ -517,3 +517,122 @@ def test_system_page_cancel_and_shutdown(client, fixtures, monkeypatch):
     time.sleep(1)
     assert sent.get("sig") is not None
     assert client.app.state.jobs.stopping is True
+
+
+def _zip_bytes(members: dict[str, bytes]) -> bytes:
+    import io
+    import zipfile
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        for k, v in members.items():
+            zf.writestr(k, v)
+    return buf.getvalue()
+
+
+def wait_batch(c: TestClient, bid: str, timeout: float = 180) -> dict:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        b = next(b for b in c.get("/api/batches").json()["batches"] if b["id"] == bid)
+        if b["status"] in ("done", "failed"):
+            return b
+        time.sleep(0.2)
+    raise AssertionError("batch never finished")
+
+
+def test_archive_upload_becomes_a_batch(client, fixtures):
+    csrf = sign_in(client)
+    z = _zip_bytes(
+        {
+            "Papers/one.pdf": fixtures["scholarly"].read_bytes(),
+            "Papers/dup.pdf": fixtures["scholarly"].read_bytes(),
+            "notes/n.md": b"# note",
+            "junk.bin": b"\0\1",
+        }
+    )
+    r = client.post(
+        "/upload",
+        files=[("files", ("bundle.zip", z, "application/zip"))],
+        data={"csrf": csrf},
+        headers={"Accept": "application/json"},
+    )
+    body = r.json()
+    assert body["created"] == [] and len(body["batches"]) == 1
+    bid = body["batches"][0]["id"]
+    b = wait_batch(client, bid)
+    assert b["status"] == "done", b
+    assert b["imported"] == 2 and b["skipped"] >= 1  # duplicate pdf + junk skipped
+    docs = client.get("/api/docs").json()["docs"]
+    assert len(docs) == 2
+    for d in docs:
+        wait_done(client, d["id"])
+    tags = {t for d in docs for t in d["tags"]}
+    assert "archive:bundle.zip" in tags and "folder:Papers" in tags
+    r = client.get("/")
+    assert "Folder and archive imports" in r.text
+
+
+def test_browse_and_folder_import(client, fixtures, tmp_path, monkeypatch):
+    csrf = sign_in(client)
+    root = tmp_path / "scan-root"
+    (root / "inner").mkdir(parents=True)
+    (root / "inner" / "p.pdf").write_bytes(fixtures["scholarly"].read_bytes())
+    (root / "m.md").write_text("# m")
+    (root / "nested.zip").write_bytes(_zip_bytes({"h.html": fixtures["html"].read_bytes()}))
+    monkeypatch.setenv("FUNICULAR_BROWSE_ROOTS", str(root))
+    r = client.get("/api/browse")
+    assert str(root.resolve()) in r.json()["roots"]
+    r = client.get(f"/api/browse?path={root}")
+    names = {e["name"]: e for e in r.json()["entries"]}
+    assert names["inner"]["is_dir"] and names["nested.zip"]["archive"]
+    assert client.get("/api/browse?path=/etc").status_code == 403
+    r = client.get(f"/browse?path={root}")
+    assert r.status_code == 200 and "Import folder" in r.text
+    r = client.post(
+        "/import/folder",
+        data={"csrf": csrf, "path": str(root), "recursive": "yes"},
+        headers={"Accept": "application/json"},
+    )
+    bid = r.json()["batch"]
+    b = wait_batch(client, bid)
+    assert b["status"] == "done" and b["imported"] == 3, b
+    assert (root / "inner" / "p.pdf").exists()  # originals untouched
+    for d in client.get("/api/docs").json()["docs"]:
+        wait_done(client, d["id"])
+    # single-file import from the browser
+    r = client.post(
+        "/import/file",
+        data={"csrf": csrf, "path": str(root / "m.md")},
+        headers={"Accept": "application/json"},
+    )
+    assert r.status_code == 200
+    r = client.post(
+        "/import/file",
+        data={"csrf": csrf, "path": "/etc/hostname"},
+        headers={"Accept": "application/json"},
+    )
+    assert r.status_code == 403
+
+
+def test_export_tar_gz(client, fixtures):
+    import io
+    import tarfile
+
+    csrf = sign_in(client)
+    r = client.post(
+        "/upload",
+        files=[("files", ("s.pdf", fixtures["scholarly"].read_bytes(), "application/pdf"))],
+        data={"csrf": csrf},
+        headers={"Accept": "application/json"},
+    )
+    doc_id = r.json()["created"][0]["id"]
+    wait_done(client, doc_id)
+    r = client.post("/export", data={"csrf": csrf, "ids": [doc_id], "what": "text"})
+    assert r.status_code == 200 and r.headers["content-type"] == "application/gzip"
+    with tarfile.open(fileobj=io.BytesIO(r.content)) as tf:
+        names = tf.getnames()
+    assert any(n.endswith(".layout.txt") for n in names) and not any(
+        n.endswith("s.pdf") for n in names
+    )
+    r = client.post("/export", data={"csrf": csrf}, headers={"Accept": "application/json"})
+    assert r.status_code == 400

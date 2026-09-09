@@ -95,6 +95,10 @@ class Settings(BaseModel):
     job_memory_cap_mb: int = 8192
     job_max_procs: int = 96
     min_free_mb: int = 1024
+    # Folder / archive imports
+    max_batch_files: int = 50_000
+    icloud_wait_seconds: int = 900
+    icloud_evict_after: bool = False
     watch_inbox: bool = False
     # Behind Tailscale Serve / Caddy: trust X-Forwarded-Proto from the loopback proxy only.
     trust_proxy: bool = False
@@ -139,6 +143,9 @@ class Settings(BaseModel):
             job_memory_cap_mb=_env_int("JOB_MEMORY_CAP_MB", 8192),
             job_max_procs=_env_int("JOB_MAX_PROCS", 96),
             min_free_mb=_env_int("MIN_FREE_MB", 1024),
+            max_batch_files=_env_int("MAX_BATCH_FILES", 50_000),
+            icloud_wait_seconds=_env_int("ICLOUD_WAIT_SECONDS", 900),
+            icloud_evict_after=_env_bool("ICLOUD_EVICT_AFTER", False),
             watch_inbox=_env_bool("WATCH_INBOX", False),
             trust_proxy=_env_bool("TRUST_PROXY", False),
         )

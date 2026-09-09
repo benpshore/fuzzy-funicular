@@ -18,7 +18,7 @@ from typing import Any
 
 from ..config import ExtractSettings, Settings
 from ..pipeline import ingest
-from ..resources import JobContext, MemoryGuard, SystemMonitor, current_job
+from ..resources import Cancelled, JobContext, MemoryGuard, SystemMonitor, current_job
 from .store import Store
 
 log = logging.getLogger(__name__)
@@ -158,7 +158,160 @@ class JobManager:
 
     def active_ids(self) -> list[str]:
         with self._lock:
-            return list(self._active)
+            return [k for k in self._active if not k.startswith("batch:")]
+
+    # ------------------------------------------------------------------ batches
+    def submit_batch(
+        self,
+        kind: str,
+        source: Path,
+        *,
+        extract: ExtractSettings | None = None,
+        recursive: bool = True,
+        delete_after: bool = False,
+        label: str | None = None,
+    ) -> str:
+        """Queue an archive unpack or a folder scan. Returns the batch id."""
+        label = label or source.name
+        bid = self.store.create_batch(kind, label if kind == "archive" else str(source))
+        key = f"batch:{bid}"
+        with self._lock:
+            self._active[key] = JobContext(id=key)
+        self._publish(
+            {
+                "type": "batch",
+                "id": bid,
+                "kind": kind,
+                "status": "queued",
+                "source": label,
+                "done": 0,
+                "total": 0,
+                "imported": 0,
+                "skipped": 0,
+            }
+        )
+        self.pool.submit(
+            self._run_batch,
+            bid,
+            kind,
+            source,
+            extract or self.settings.extract,
+            recursive,
+            delete_after,
+            label,
+        )
+        return bid
+
+    def cancel_batch(self, bid: str) -> bool:
+        return self.cancel(f"batch:{bid}", "batch cancelled by user")
+
+    def _run_batch(
+        self, bid, kind, source: Path, extract, recursive, delete_after, label=None
+    ) -> None:
+        label = label or source.name
+        from .importer import import_archive, import_folder
+
+        key = f"batch:{bid}"
+        with self._lock:
+            ctx = self._active.get(key)
+        if ctx is None:
+            return
+        token = current_job.set(ctx)
+        state = {"done": 0, "total": 0}
+
+        def progress(done: int, total: int) -> None:
+            ctx.check()
+            state.update(done=done, total=total)
+            self.store.update_batch(bid, status="running", done=done, total=total)
+            self._publish(
+                {
+                    "type": "batch",
+                    "id": bid,
+                    "kind": kind,
+                    "status": "running",
+                    "source": label,
+                    "done": done,
+                    "total": total,
+                }
+            )
+
+        try:
+            self.store.update_batch(bid, status="running")
+            if kind == "archive":
+                res = import_archive(
+                    self.settings,
+                    self.store,
+                    self,
+                    source,
+                    source="archive",
+                    extract=extract,
+                    progress=progress,
+                    delete_after=delete_after,
+                    label=label,
+                )
+            else:
+                res = import_folder(
+                    self.settings,
+                    self.store,
+                    self,
+                    source,
+                    recursive=recursive,
+                    source="folder",
+                    extract=extract,
+                    progress=progress,
+                )
+            self.store.update_batch(
+                bid,
+                status="done",
+                total=res.total,
+                done=res.total,
+                imported=res.imported,
+                skipped=res.skipped,
+                errors=res.errors,
+            )
+            self._publish(
+                {
+                    "type": "batch",
+                    "id": bid,
+                    "kind": kind,
+                    "status": "done",
+                    "source": label,
+                    "done": res.total,
+                    "total": res.total,
+                    "imported": res.imported,
+                    "skipped": res.skipped,
+                    "errors": len(res.errors),
+                }
+            )
+        except Cancelled as exc:
+            self.store.update_batch(bid, status="failed", errors=[f"cancelled: {exc}"])
+            self._publish(
+                {
+                    "type": "batch",
+                    "id": bid,
+                    "kind": kind,
+                    "status": "failed",
+                    "source": label,
+                    "error": str(exc),
+                }
+            )
+        except Exception as exc:
+            log.exception("batch %s failed", bid)
+            self.store.update_batch(bid, status="failed", errors=[str(exc)[:500]])
+            self._publish(
+                {
+                    "type": "batch",
+                    "id": bid,
+                    "kind": kind,
+                    "status": "failed",
+                    "source": label,
+                    "error": str(exc)[:300],
+                }
+            )
+        finally:
+            current_job.reset(token)
+            with self._lock:
+                self._active.pop(key, None)
 
     def _run(self, doc_id: str, extract: ExtractSettings) -> None:
         with self._lock:
@@ -253,6 +406,10 @@ class JobManager:
                 publish_to_archive(self.settings, self.store.get(doc_id))
             except Exception as exc:  # archive is best effort (iCloud may be offline)
                 log.warning("archive publish failed for %s: %s", doc_id, exc)
+            if self.settings.icloud_evict_after:
+                from ..icloud import evict
+
+                evict(original)
             self._publish(
                 {
                     "type": "done",

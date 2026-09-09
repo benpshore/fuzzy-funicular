@@ -70,6 +70,19 @@ CREATE TABLE IF NOT EXISTS oauth_states (
     created_at REAL NOT NULL,
     next_path TEXT NOT NULL DEFAULT '/'
 );
+CREATE TABLE IF NOT EXISTS batches (
+    id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,             -- archive | folder
+    source TEXT NOT NULL,
+    status TEXT NOT NULL,           -- queued | running | done | failed
+    total INTEGER NOT NULL DEFAULT 0,
+    done INTEGER NOT NULL DEFAULT 0,
+    imported INTEGER NOT NULL DEFAULT 0,
+    skipped INTEGER NOT NULL DEFAULT 0,
+    errors TEXT NOT NULL DEFAULT '[]',
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS audit (
     ts REAL NOT NULL,
     event TEXT NOT NULL,
@@ -443,6 +456,58 @@ class Store:
             if not row or time.time() - row["created_at"] > max_age:
                 return None
             return row["next_path"]
+
+    # ---------------------------------------------------------------- batches
+    def create_batch(self, kind: str, source: str) -> str:
+        bid = secrets.token_urlsafe(9)
+        now = time.time()
+        with self._conn() as c:
+            c.execute(
+                "INSERT INTO batches (id,kind,source,status,created_at,updated_at)"
+                " VALUES (?,?,?,'queued',?,?)",
+                (bid, kind, source, now, now),
+            )
+        return bid
+
+    def update_batch(self, bid: str, **fields: Any) -> None:
+        if not fields:
+            return
+        cols = []
+        args: list[Any] = []
+        for k, v in fields.items():
+            if k not in ("status", "total", "done", "imported", "skipped", "errors"):
+                raise ValueError(k)
+            cols.append(f"{k}=?")
+            args.append(json.dumps(v) if k == "errors" else v)
+        args += [time.time(), bid]
+        with self._conn() as c:
+            c.execute(f"UPDATE batches SET {', '.join(cols)}, updated_at=? WHERE id=?", args)  # noqa: S608
+
+    def get_batch(self, bid: str) -> dict | None:
+        with self._conn() as c:
+            row = c.execute("SELECT * FROM batches WHERE id=?", (bid,)).fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        d["errors"] = json.loads(d["errors"] or "[]")
+        return d
+
+    def list_batches(self, limit: int = 50) -> list[dict]:
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT * FROM batches ORDER BY created_at DESC LIMIT ?", (limit,)
+            ).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            d["errors"] = json.loads(d["errors"] or "[]")
+            out.append(d)
+        return out
+
+    def add_tags(self, doc_id: str, names: list[str]) -> None:
+        doc = self.get(doc_id)
+        if doc is not None:
+            self.set_tags(doc_id, list(doc.tags) + list(names))
 
     # ---------------------------------------------------------------- audit
     def audit(self, event: str, detail: str = "") -> None:
