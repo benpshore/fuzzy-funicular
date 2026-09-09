@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block title %}Sign-in failed · Funicular{% endblock %}
+{% block content %}
+<div class="card center stack">
+  <h1 class="h1">Sign-in failed</h1>
+  <p class="bad">{{ reason }}</p>
+  <a class="btn btn-secondary" href="/auth/login">Try again</a>
+</div>
+{% endblock %}
