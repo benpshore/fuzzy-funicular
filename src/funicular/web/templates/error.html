@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block title %}{{ status }} · Funicular{% endblock %}
+{% block content %}
+<div class="card center stack">
+  <h1 class="h1">{{ status }}</h1>
+  <p>{{ detail }}</p>
+  <a class="btn btn-secondary" href="/">Back to library</a>
+</div>
+{% endblock %}

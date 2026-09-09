@@ -1,0 +1,20 @@
+<li class="row-item status-{{ d.status }}" data-doc-id="{{ d.id }}">
+  <a class="row-link" href="/doc/{{ d.id }}">
+    <span class="row-main">
+      <span class="row-title">{{ d.title }}</span>
+      <span class="row-sub muted">{{ d.kind|upper }} · {{ d.size|human_size }}{% if d.pages %} · {{ d.pages }} p{% endif %} · {{ d.created_at|when }}{% if d.tags %} · {{ d.tags|join(', ') }}{% endif %}</span>
+    </span>
+    <span class="row-side">
+      {% if d.status == 'done' and d.needs_ocr %}<span class="badge badge-warn" data-role="status">Needs OCR</span>
+      {% elif d.status == 'done' and d.warnings %}<span class="badge badge-warn" data-role="status">{{ d.warnings|length }} note{{ 's' if d.warnings|length != 1 }}</span>
+      {% elif d.status == 'failed' %}<span class="badge badge-bad" data-role="status">Failed</span>
+      {% elif d.status == 'done' %}<span class="badge badge-ok" data-role="status">Ready</span>
+      {% else %}<span class="badge" data-role="status">{{ stage_label(d.stage or 'queued') }}</span>{% endif %}
+      <span class="chev" aria-hidden="true">›</span>
+    </span>
+  </a>
+  <div class="progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="{{ d.progress|int }}" aria-label="Processing {{ d.title }}" {% if d.status in ('done','failed') %}hidden{% endif %}>
+    <div class="bar" style="width: {{ d.progress }}%"></div>
+  </div>
+  <p class="row-stage muted small" aria-live="polite">{% if d.status not in ('done','failed') %}{{ stage_label(d.stage or 'queued') }}{% endif %}</p>
+</li>

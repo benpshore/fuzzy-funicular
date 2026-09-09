@@ -1,0 +1,92 @@
+{% extends "base.html" %}
+{% block title %}{{ doc.title }} · Funicular{% endblock %}
+{% block content %}
+<p><a class="back" href="/">‹ Library</a></p>
+<h1 class="h1 wrap">{{ doc.title }}</h1>
+<p class="muted">{{ doc.original_name }} · {{ doc.kind|upper }} · {{ doc.size|human_size }}{% if doc.pages %} · {{ doc.pages }} pages{% endif %} · added {{ doc.created_at|when }}</p>
+
+<div class="card status-card status-{{ doc.status }}" data-doc-id="{{ doc.id }}">
+  <div class="row-between">
+    <span class="badge {% if doc.status == 'done' and doc.needs_ocr %}badge-warn{% elif doc.status == 'failed' %}badge-bad{% elif doc.status == 'done' %}badge-ok{% endif %}" data-role="status">
+      {% if doc.status == 'done' and doc.needs_ocr %}Needs OCR{% elif doc.status == 'failed' %}Failed{% elif doc.status == 'done' %}Ready{% else %}{{ stage_label(doc.stage or 'queued') }}{% endif %}
+    </span>
+    {% if doc.ocr_used %}<span class="muted small">OCR applied</span>{% endif %}
+  </div>
+  <div class="progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="{{ doc.progress|int }}" aria-label="Processing" {% if doc.status in ('done','failed') %}hidden{% endif %}>
+    <div class="bar" style="width: {{ doc.progress }}%"></div>
+  </div>
+  <p class="row-stage muted small" aria-live="polite">{% if doc.status not in ('done','failed') %}{{ stage_label(doc.stage or 'queued') }}{% endif %}</p>
+  {% if doc.error %}<p class="bad">{{ doc.error }}</p>{% endif %}
+  {% if doc.warnings %}
+  <details class="notes"><summary>{{ doc.warnings|length }} note{{ 's' if doc.warnings|length != 1 }}</summary>
+    <ul>{% for w in doc.warnings %}<li>{{ w }}</li>{% endfor %}</ul></details>
+  {% endif %}
+</div>
+
+<div class="two">
+  <div>
+    {% if has_thumb and doc.status == 'done' %}
+    <figure class="thumb card"><img src="/doc/{{ doc.id }}/thumb.png" alt="First page of {{ doc.title }}" loading="lazy"></figure>
+    {% endif %}
+
+    <section class="card" aria-labelledby="files-h">
+      <h2 id="files-h" class="h2">Files</h2>
+      <ul class="list plain">
+        {% for key, label in [('layout','Layout text (.layout.txt)'),('markdown','Markdown (.md)'),('text','Plain text (.txt)'),('ocr_pdf','Searchable PDF'),('report','Report (.json)'),('original','Original')] %}
+        {% if key in doc.outputs %}
+        <li><a class="row-link" href="/doc/{{ doc.id }}/file/{{ key }}?download=1"><span class="row-main">{{ label }}</span><span class="chev" aria-hidden="true">⤓</span></a></li>
+        {% endif %}
+        {% endfor %}
+      </ul>
+    </section>
+
+    <section class="card" aria-labelledby="act-h">
+      <h2 id="act-h" class="h2">Actions</h2>
+      <form method="post" action="/doc/{{ doc.id }}/reprocess" class="stack">
+        <input type="hidden" name="csrf" value="{{ user.csrf }}">
+        <fieldset class="row"><legend class="label">Re-run extraction</legend>
+          <label class="choice"><input type="radio" name="ocr" value="off"> No OCR</label>
+          <label class="choice"><input type="radio" name="ocr" value="auto" checked> OCR where needed</label>
+          <label class="choice"><input type="radio" name="ocr" value="force"> OCR everything</label>
+        </fieldset>
+        <button class="btn btn-secondary" type="submit">Re-run</button>
+      </form>
+      <form method="post" action="/doc/{{ doc.id }}/tags" class="stack">
+        <input type="hidden" name="csrf" value="{{ user.csrf }}">
+        <label class="label" for="tags">Tags (comma separated)</label>
+        <input class="input" id="tags" name="tags" value="{{ doc.tags|join(', ') }}" autocapitalize="none" autocomplete="off">
+        <button class="btn btn-secondary" type="submit">Save tags</button>
+      </form>
+      <form method="post" action="/doc/{{ doc.id }}/rename" class="stack">
+        <input type="hidden" name="csrf" value="{{ user.csrf }}">
+        <label class="label" for="title">Title</label>
+        <input class="input" id="title" name="title" value="{{ doc.title }}" required maxlength="200">
+        <button class="btn btn-secondary" type="submit">Rename</button>
+      </form>
+      <form method="post" action="/doc/{{ doc.id }}/delete" class="stack" data-confirm>
+        <input type="hidden" name="csrf" value="{{ user.csrf }}">
+        <label class="choice"><input type="checkbox" name="confirm" value="yes" required> I want to delete this document and its files</label>
+        <button class="btn btn-danger" type="submit">Delete</button>
+      </form>
+    </section>
+  </div>
+
+  <section class="card viewer" aria-labelledby="view-h">
+    <h2 id="view-h" class="h2">Text</h2>
+    {% if available %}
+    <nav class="segs" aria-label="Text view">
+      {% for key, label in [('layout','Layout'),('markdown','Markdown'),('text','Plain')] %}
+      {% if key in available %}<a class="seg {% if view == key %}seg-on{% endif %}" href="/doc/{{ doc.id }}?view={{ key }}" {% if view == key %}aria-current="page"{% endif %}>{{ label }}</a>{% endif %}
+      {% endfor %}
+    </nav>
+    <pre class="text {% if view == 'layout' %}layout{% endif %}" tabindex="0" aria-label="{{ view }} text">{{ content }}</pre>
+    {% elif doc.status == 'done' and doc.needs_ocr %}
+    <p>This file has no text layer. Re-run with OCR to extract it.</p>
+    {% elif doc.status in ('queued','running') %}
+    <p>Still processing. This page updates automatically.</p>
+    {% else %}
+    <p class="muted">No text output.</p>
+    {% endif %}
+  </section>
+</div>
+{% endblock %}
