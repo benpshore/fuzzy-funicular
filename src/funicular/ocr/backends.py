@@ -64,40 +64,126 @@ class Backend:
 
 
 # --------------------------------------------------------------------------------------------
-# Apple Vision via the `ocrmac` package (pyobjc). macOS only.
+# Apple Vision (VNRecognizeTextRequest). macOS only.
+#
+# Two ways in, same output: the `ocrmac` package when it is installed, otherwise a direct call
+# through pyobjc's Vision framework (pyobjc-framework-Vision ships cp314 universal2 wheels).
+# Vision reports boxes normalised to the image with the origin at the bottom-left; we convert
+# to top-left pixel boxes so the layout reconstruction is shared with every other backend.
 # --------------------------------------------------------------------------------------------
 class MacVisionBackend(Backend):
     name = "macocr"
 
     def __init__(self, languages: list[str], recognition_level: str = "accurate") -> None:
+        self.languages = [lang for lang in languages if lang]
+        self.recognition_level = recognition_level
+        self._ocrmac = None
+        self._vision = None
         try:
             from ocrmac import ocrmac as _ocrmac  # type: ignore[import-not-found]
-        except ImportError as exc:  # pragma: no cover - darwin only
-            raise OcrUnavailableError(
-                "ocrmac is not installed. Run: uv sync --extra ocr  (macOS only)"
-            ) from exc
-        self._ocrmac = _ocrmac
-        self.languages = languages
-        self.recognition_level = recognition_level
 
-    def recognize(self, image: Image.Image) -> list[OcrLine]:  # pragma: no cover - darwin only
+            self._ocrmac = _ocrmac
+        except Exception:  # noqa: BLE001 - fall through to the direct framework path
+            try:
+                import Vision as _vision  # type: ignore[import-not-found]
+
+                self._vision = _vision
+            except Exception as exc:
+                raise OcrUnavailableError(
+                    "Apple Vision is unavailable: install the ocr extra on macOS "
+                    "(uv sync --extra ocr)"
+                ) from exc
+
+    # -- entry -----------------------------------------------------------------------------
+    def recognize(self, image: Image.Image) -> list[OcrLine]:
         image = image.convert("RGB")
+        if self._ocrmac is not None:
+            return self._via_ocrmac(image)
+        return self._via_vision(image)
+
+    # -- ocrmac ----------------------------------------------------------------------------
+    def _via_ocrmac(self, image: Image.Image) -> list[OcrLine]:
         kwargs: dict[str, Any] = {
             "recognition_level": self.recognition_level,
             "language_preference": self.languages or None,
         }
         try:
-            ocr = self._ocrmac.OCR(image, **kwargs)
-            raw = ocr.recognize(px=True)
+            raw = self._ocrmac.OCR(image, **kwargs).recognize(px=True)
         except ValueError:
-            # Unsupported language preference on this macOS release: let Vision pick.
+            # This macOS release does not support one of the requested languages: let Vision
+            # choose. (ocrmac validates against supportedRecognitionLanguages.)
             kwargs["language_preference"] = None
-            ocr = self._ocrmac.OCR(image, **kwargs)
-            raw = ocr.recognize(px=True)
+            raw = self._ocrmac.OCR(image, **kwargs).recognize(px=True)
         lines: list[OcrLine] = []
         for text, conf, (x0, y0, x1, y1) in raw:
-            lines.append(OcrLine(text=text, x0=x0, y0=y0, x1=x1, y1=y1, confidence=float(conf)))
+            lines.append(
+                OcrLine(
+                    text=str(text),
+                    x0=float(x0),
+                    y0=float(y0),
+                    x1=float(x1),
+                    y1=float(y1),
+                    confidence=float(conf),
+                )
+            )
         return lines
+
+    # -- direct pyobjc ---------------------------------------------------------------------
+    def _via_vision(self, image: Image.Image) -> list[OcrLine]:
+        vision = self._vision
+        buf = io.BytesIO()
+        image.save(buf, format="PNG")
+        data = buf.getvalue()
+        req = vision.VNRecognizeTextRequest.alloc().init()
+        # 0 = accurate, 1 = fast (VNRequestTextRecognitionLevel)
+        req.setRecognitionLevel_(1 if self.recognition_level == "fast" else 0)
+        if hasattr(req, "setUsesLanguageCorrection_"):
+            req.setUsesLanguageCorrection_(True)
+        if self.languages:
+            supported: list[str] = []
+            try:
+                res = req.supportedRecognitionLanguagesAndReturnError_(None)
+                supported = list(res[0] if isinstance(res, tuple) else res or [])
+            except Exception as exc:  # noqa: BLE001
+                log.debug("supportedRecognitionLanguages failed: %s", exc)
+            wanted = [lang for lang in self.languages if not supported or lang in supported]
+            if wanted:
+                req.setRecognitionLanguages_(wanted)
+        elif hasattr(req, "setAutomaticallyDetectsLanguage_"):
+            req.setAutomaticallyDetectsLanguage_(True)
+        handler = vision.VNImageRequestHandler.alloc().initWithData_options_(data, None)
+        ret = handler.performRequests_error_([req], None)
+        ok, err = ret if isinstance(ret, tuple) else (bool(ret), None)
+        if not ok or err is not None:
+            raise OcrUnavailableError(f"Vision request failed: {err}")
+        return vision_results_to_lines(req.results() or [], image.width, image.height)
+
+
+def vision_results_to_lines(results: Any, width: int, height: int) -> list[OcrLine]:
+    """Convert VNRecognizedTextObservation objects to top-left pixel OcrLines."""
+    lines: list[OcrLine] = []
+    for obs in results:
+        text = ""
+        try:
+            cands = obs.topCandidates_(1)
+            if cands:
+                text = str(cands[0].string())
+        except Exception:  # noqa: BLE001 - older observation classes expose .text()
+            text = ""
+        if not text and hasattr(obs, "text"):
+            text = str(obs.text())
+        if not text.strip():
+            continue
+        bbox = obs.boundingBox()
+        x, y = float(bbox.origin.x), float(bbox.origin.y)
+        w, h = float(bbox.size.width), float(bbox.size.height)
+        x0 = x * width
+        x1 = (x + w) * width
+        y1 = (1.0 - y) * height
+        y0 = y1 - h * height
+        conf = float(obs.confidence()) if hasattr(obs, "confidence") else 0.0
+        lines.append(OcrLine(text=text, x0=x0, y0=y0, x1=x1, y1=y1, confidence=conf))
+    return lines
 
 
 # --------------------------------------------------------------------------------------------
@@ -241,13 +327,16 @@ def _is_darwin() -> bool:
 
 
 def _ocrmac_importable() -> bool:
+    """True when Apple Vision can be reached: via ocrmac or pyobjc's Vision framework."""
     if not _is_darwin():
         return False
-    try:
-        import ocrmac  # type: ignore[import-not-found]  # noqa: F401
-    except Exception:
-        return False
-    return True
+    for mod in ("ocrmac", "Vision"):
+        try:
+            __import__(mod)
+            return True
+        except Exception as exc:  # noqa: BLE001
+            log.debug("%s not importable: %s", mod, exc)
+    return False
 
 
 def _macocr_cli() -> str | None:
@@ -267,7 +356,7 @@ def describe_backends() -> list[dict[str, Any]]:
     return [
         {
             "name": "macocr",
-            "description": "Apple Vision (VNRecognizeTextRequest) via ocrmac",
+            "description": "Apple Vision (VNRecognizeTextRequest) via ocrmac or pyobjc",
             "available": _ocrmac_importable(),
             "note": "" if _is_darwin() else "macOS only",
         },
