@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" media="(prefers-color-scheme: light)" content="#f2f2f7">
+<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#000000">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Funicular">
+<meta name="referrer" content="no-referrer">
+{% if user %}<meta name="csrf" content="{{ user.csrf }}">{% endif %}
+<title>{% block title %}Funicular{% endblock %}</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/static/app.css">
+<script src="/static/theme.js"></script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="topbar" role="banner">
+  <div class="topbar-inner">
+    <a class="brand" href="/" aria-label="Funicular home">
+      <svg width="28" height="28" viewBox="0 0 64 64" aria-hidden="true"><rect x="4" y="4" width="56" height="56" rx="14" fill="currentColor"/><path d="M18 46V18h26v8H27v5h14v8H27v7z" fill="var(--bg)"/></svg>
+      <span>Funicular</span>
+    </a>
+    {% if user %}
+    <nav class="topnav" aria-label="Primary">
+      <a href="/" {% if request.url.path == '/' %}aria-current="page"{% endif %}>Library</a>
+      <a href="/search" {% if request.url.path == '/search' %}aria-current="page"{% endif %}>Search</a>
+    </nav>
+    <form class="signout" method="post" action="/auth/logout">
+      <input type="hidden" name="csrf" value="{{ user.csrf }}">
+      <button class="btn btn-quiet" type="submit" aria-label="Sign out {{ user.login }}">Sign out</button>
+    </form>
+    {% endif %}
+  </div>
+</header>
+<main id="main" class="page" tabindex="-1">
+{% block content %}{% endblock %}
+</main>
+<footer class="foot">
+  <div class="theme" role="group" aria-label="Appearance">
+    <button type="button" class="seg" data-theme-choice="system" aria-pressed="true">System</button>
+    <button type="button" class="seg" data-theme-choice="light" aria-pressed="false">Light</button>
+    <button type="button" class="seg" data-theme-choice="dark" aria-pressed="false">Dark</button>
+  </div>
+  <p class="muted small">Funicular {{ version }} · private</p>
+</footer>
+<script src="/static/app.js"></script>
+</body>
+</html>

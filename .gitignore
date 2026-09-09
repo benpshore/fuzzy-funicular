@@ -216,3 +216,10 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# funicular
+out/
+tests/fixtures/generated/
+.env
+*.sqlite3
+*.sqlite3-*

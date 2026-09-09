@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% block title %}Library · Funicular{% endblock %}
+{% block content %}
+<h1 class="h1">Library</h1>
+
+<section class="card upload" aria-labelledby="upload-h">
+  <h2 id="upload-h" class="h2">Add documents</h2>
+  <form id="upload-form" method="post" action="/upload" enctype="multipart/form-data">
+    <input type="hidden" name="csrf" value="{{ user.csrf }}">
+    <label class="filebtn btn btn-primary" for="files">
+      <span>Choose files…</span>
+      <input id="files" name="files" type="file" multiple
+        accept=".pdf,.png,.jpg,.jpeg,.heic,.tif,.tiff,.webp,.docx,.pptx,.xlsx,.html,.htm,.md,.txt,.csv,.epub,.mp3,.m4a,.wav,.flac,.ogg,.mp4,.mov,application/pdf,image/*,audio/*,video/*">
+    </label>
+    <fieldset class="row" aria-label="Text recognition">
+      <legend class="label">Text recognition (OCR) for scans and photos</legend>
+      <label class="choice"><input type="radio" name="ocr" value="off" {% if ocr_default == 'off' %}checked{% endif %}> Off</label>
+      <label class="choice"><input type="radio" name="ocr" value="auto" {% if ocr_default == 'auto' %}checked{% endif %}> Only where needed</label>
+      <label class="choice"><input type="radio" name="ocr" value="force" {% if ocr_default == 'force' %}checked{% endif %}> Everything</label>
+    </fieldset>
+    <button class="btn btn-secondary" type="submit" id="upload-submit">Upload</button>
+    <p id="upload-status" class="status" role="status" aria-live="polite"></p>
+    <p class="muted small">Drop files here or in the iCloud folder <code>{{ settings.inbox_dir.name }}</code>. Up to {{ settings.max_upload_mb }} MB each.</p>
+  </form>
+</section>
+
+{% if tags %}
+<nav class="chips" aria-label="Tags">
+  <a class="chip {% if not tag %}chip-on{% endif %}" href="/">All</a>
+  {% for name, n in tags %}
+  <a class="chip {% if tag == name %}chip-on{% endif %}" href="/?tag={{ name|urlencode }}">{{ name }} <span class="muted">{{ n }}</span></a>
+  {% endfor %}
+</nav>
+{% endif %}
+
+<section aria-labelledby="docs-h">
+  <h2 id="docs-h" class="h2 vh">Documents</h2>
+  <ul class="list" id="doc-list">
+    {% for d in docs %}
+    {% include "_doc_row.html" %}
+    {% else %}
+    <li class="card empty">No documents yet. Upload one above, or drop a file in your iCloud inbox.</li>
+    {% endfor %}
+  </ul>
+</section>
+
+<template id="doc-row-template">
+  <li class="row-item" data-doc-id="">
+    <a class="row-link" href="#">
+      <span class="row-main">
+        <span class="row-title"></span>
+        <span class="row-sub muted"></span>
+      </span>
+      <span class="row-side">
+        <span class="badge" data-role="status"></span>
+        <span class="chev" aria-hidden="true">›</span>
+      </span>
+    </a>
+    <div class="progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-label="Processing">
+      <div class="bar"></div>
+    </div>
+    <p class="row-stage muted small" aria-live="polite"></p>
+  </li>
+</template>
+{% endblock %}

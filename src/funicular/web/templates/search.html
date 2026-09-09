@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block title %}Search · Funicular{% endblock %}
+{% block content %}
+<h1 class="h1">Search</h1>
+<form class="card searchbar" method="get" action="/search" role="search">
+  <label class="vh" for="q">Search text</label>
+  <input class="input" id="q" name="q" type="search" value="{{ q }}" placeholder="Words in any document" autocomplete="off" autofocus>
+  <button class="btn btn-primary" type="submit">Search</button>
+</form>
+{% if q %}
+<p class="muted">{{ results|length }} result{{ 's' if results|length != 1 }} for “{{ q }}”</p>
+<ul class="list">
+  {% for d, snip in results %}
+  <li class="row-item" data-doc-id="{{ d.id }}">
+    <a class="row-link" href="/doc/{{ d.id }}">
+      <span class="row-main">
+        <span class="row-title">{{ d.title }}</span>
+        <span class="row-sub muted">{{ d.kind|upper }} · {{ d.created_at|when }}{% if d.tags %} · {{ d.tags|join(', ') }}{% endif %}</span>
+        <span class="snippet">{{ snip }}</span>
+      </span>
+      <span class="chev" aria-hidden="true">›</span>
+    </a>
+  </li>
+  {% else %}
+  <li class="card empty">Nothing matched. Scanned documents need OCR before their text is searchable.</li>
+  {% endfor %}
+</ul>
+{% endif %}
+{% endblock %}
