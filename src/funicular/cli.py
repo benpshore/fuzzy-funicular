@@ -172,6 +172,73 @@ def detect(pdf: Annotated[Path, typer.Argument(exists=True, dir_okay=False)]) ->
 
 
 @app.command()
+def compress(
+    pdf: Annotated[Path, typer.Argument(exists=True, dir_okay=False)],
+    out: Annotated[Path | None, typer.Option("-o", "--out")] = None,
+    strength: Annotated[
+        int, typer.Option(min=0, max=100, help="0 = gentlest, 100 = smallest")
+    ] = 50,
+    engine: Annotated[str, typer.Option(help="auto | pymupdf | ghostscript")] = "auto",
+    preview: Annotated[bool, typer.Option(help="Estimate only; write nothing")] = False,
+) -> None:
+    """Shrink a PDF (images re-encoded, text untouched). --preview shows the expected result."""
+    from .compress import compress as _compress
+    from .compress import preview as _preview
+    from .web.app import human_size
+
+    plan = _preview(pdf, strength, engine=engine)
+    console.print(
+        f"{pdf.name}: {human_size(plan.original_bytes)} → ≈{human_size(plan.estimated_bytes)}"
+        f" ({plan.to_dict()['ratio']:.0%}) in ≈{plan.estimated_seconds}s via {plan.engine}"
+        f" [{plan.level.label}]" + (f" — {plan.note}" if plan.note else "")
+    )
+    if preview:
+        return
+    out = out or pdf.with_name(pdf.stem + ".compressed.pdf")
+    res = _compress(pdf, out, strength, engine=engine)
+    console.print(
+        f"[green]✓[/] {out} {human_size(res.original_bytes)} → {human_size(res.output_bytes)}"
+        f" ({res.to_dict()['ratio']:.0%}) in {res.seconds:.1f}s via {res.engine}"
+    )
+
+
+@app.command()
+def estimate(
+    sources: Annotated[list[Path], typer.Argument(exists=True, dir_okay=False)],
+    ocr: Annotated[str, typer.Option(help="off | auto | force")] = "off",
+) -> None:
+    """Estimate time and memory before extracting (no work is done)."""
+    from .estimate import audio_minutes, pdf_page_count
+    from .estimate import estimate as _estimate
+    from .resources import gpu_info
+    from .sniff import sniff
+
+    settings = ExtractSettings(ocr=ocr)  # type: ignore[arg-type]
+    table = Table(title="work estimate")
+    for col in ("file", "kind", "units", "≈ seconds", "peak MB", "note"):
+        table.add_column(col)
+    total = 0.0
+    for src in sources:
+        kind = sniff(src).kind
+        pages = pdf_page_count(src) if kind.value == "pdf" else 0
+        minutes = audio_minutes(src) if kind.value in ("audio", "video") else 0.0
+        e = _estimate(
+            kind,
+            pages=pages,
+            size_bytes=src.stat().st_size,
+            audio_minutes=minutes,
+            settings=settings,
+            apple_silicon=gpu_info()["apple_silicon"],
+        )
+        total += e.seconds
+        table.add_row(
+            src.name, kind.value, f"{e.units} {e.unit}", f"{e.seconds}", f"{e.peak_mb:.0f}", e.note
+        )
+    console.print(table)
+    console.print(f"total ≈ {total:.0f} s")
+
+
+@app.command()
 def serve(
     host: Annotated[
         str | None, typer.Option(help="Bind address (default from env, 127.0.0.1)")

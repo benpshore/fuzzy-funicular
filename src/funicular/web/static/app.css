@@ -209,3 +209,9 @@ fieldset.row { border: 0; padding: 0; margin: 0; display: flex; flex-wrap: wrap;
 .batch-item .row-stage { margin: 6px 0 0; }
 .crumbs { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .crumbs code { overflow-wrap: anywhere; }
+
+/* slider: big thumb, still fine with a keyboard (arrow keys) or the preset chips */
+.slider { width: 100%; height: 44px; accent-color: var(--accent); margin: 0; }
+.slider::-webkit-slider-thumb { width: 32px; height: 32px; }
+.adv summary { min-height: 44px; display: flex; align-items: center; cursor: pointer; color: var(--accent); font-weight: 600; }
+.chips button.chip { border: 0; font: inherit; cursor: pointer; }

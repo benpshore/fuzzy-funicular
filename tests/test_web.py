@@ -636,3 +636,38 @@ def test_export_tar_gz(client, fixtures):
     )
     r = client.post("/export", data={"csrf": csrf}, headers={"Accept": "application/json"})
     assert r.status_code == 400
+
+
+def test_compress_plan_page_and_run(client, fixtures):
+    csrf = sign_in(client)
+    r = client.post(
+        "/upload",
+        files=[("files", ("s.pdf", fixtures["scholarly"].read_bytes(), "application/pdf"))],
+        data={"csrf": csrf},
+        headers={"Accept": "application/json"},
+    )
+    doc_id = r.json()["created"][0]["id"]
+    wait_done(client, doc_id)
+    r = client.get(f"/doc/{doc_id}/plan?op=reprocess&ocr=auto")
+    assert r.status_code == 200 and r.json()["estimate"]["seconds"] > 0
+    r = client.get(f"/doc/{doc_id}/plan?op=compress&strength=70")
+    p = r.json()
+    assert p["op"] == "compress" and p["pages"] == 2 and 0 < p["ratio"] <= 1
+    r = client.get(f"/doc/{doc_id}/compress?strength=70")
+    assert r.status_code == 200 and "Compress now" in r.text
+    r = client.post(
+        f"/doc/{doc_id}/compress",
+        data={"csrf": csrf, "strength": "70"},
+        headers={"Accept": "application/json"},
+    )
+    assert r.status_code == 200
+    deadline = time.time() + 60
+    while time.time() < deadline:
+        d = client.get(f"/api/docs/{doc_id}").json()
+        if "compressed" in d["outputs"]:
+            break
+        time.sleep(0.2)
+    assert "compressed" in d["outputs"]
+    r = client.get(f"/doc/{doc_id}/file/compressed")
+    assert r.status_code == 200 and r.content.startswith(b"%PDF")
+    assert client.get("/doc/nope/plan").status_code == 404

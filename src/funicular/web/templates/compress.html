@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block title %}Compress · {{ doc.title }}{% endblock %}
+{% block content %}
+<p><a class="back" href="/doc/{{ doc.id }}">‹ {{ doc.title }}</a></p>
+<h1 class="h1">Compress PDF</h1>
+<p class="muted">Nothing is changed until you press <strong>Compress now</strong>. The preview compresses a few sample pages with the same settings.</p>
+
+<form class="card stack" method="get" action="/doc/{{ doc.id }}/compress" id="compress-preview-form" data-doc-id="{{ doc.id }}">
+  <label class="label" for="strength">Strength: <output id="strength-out" for="strength">{{ strength }}</output> / 100</label>
+  <input class="slider" type="range" id="strength" name="strength" min="0" max="100" step="5" value="{{ strength }}" aria-describedby="strength-help">
+  <p id="strength-help" class="muted small">Higher = smaller file, lower image quality. Text stays sharp at every level.</p>
+  <div class="chips" role="group" aria-label="Presets">
+    {% for name, val in presets.items() %}
+    <button class="chip {% if val == strength %}chip-on{% endif %}" type="submit" name="strength" value="{{ val }}">{{ name|capitalize }} ({{ val }})</button>
+    {% endfor %}
+  </div>
+  <details class="adv"><summary>Advanced</summary>
+    <fieldset class="row"><legend class="label">Engine</legend>
+      <label class="choice"><input type="radio" name="engine" value="auto" {% if engine == 'auto' %}checked{% endif %}> Auto</label>
+      <label class="choice"><input type="radio" name="engine" value="pymupdf" {% if engine == 'pymupdf' %}checked{% endif %}> Images only (fast)</label>
+      <label class="choice"><input type="radio" name="engine" value="ghostscript" {% if engine == 'ghostscript' %}checked{% endif %}> Ghostscript rewrite</label>
+    </fieldset>
+  </details>
+  <button class="btn btn-secondary" type="submit">Preview</button>
+</form>
+
+<section class="card" aria-live="polite" id="plan">
+  <h2 class="h2">Preview</h2>
+  {% if error %}<p class="bad">{{ error }}</p>{% endif %}
+  {% if plan %}
+  <dl class="kv">
+    <dt>Now</dt><dd>{{ plan.original_bytes|human_size }} · {{ plan.pages }} pages</dd>
+    <dt>After</dt><dd><strong data-plan="after">≈ {{ plan.estimated_bytes|human_size }}</strong> (<span data-plan="ratio">{{ (100 * plan.ratio)|round(0)|int }}%</span> of the original)</dd>
+    <dt>Time</dt><dd data-plan="time">≈ {{ plan.estimated_seconds }} s</dd>
+    <dt>Engine</dt><dd data-plan="engine">{{ plan.engine }} · {{ plan.level.label }}</dd>
+    {% if plan.note %}<dt>Note</dt><dd data-plan="note">{{ plan.note }}</dd>{% endif %}
+  </dl>
+  {% endif %}
+</section>
+
+<form class="card stack" method="post" action="/doc/{{ doc.id }}/compress">
+  <input type="hidden" name="csrf" value="{{ user.csrf }}">
+  <input type="hidden" name="strength" value="{{ strength }}" data-mirror="strength">
+  <input type="hidden" name="engine" value="{{ engine }}" data-mirror="engine">
+  <p class="muted small">Writes a new <code>compressed.pdf</code> next to the original; the original is never touched.</p>
+  <button class="btn btn-primary" type="submit">Compress now</button>
+</form>
+{% endblock %}

@@ -164,6 +164,11 @@ def create_app(settings: Settings, *, validate: bool = True) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        # Probe acceleration (imports torch when installed) before any job thread starts, so
+        # the first import never races a model load in a worker.
+        from ..resources import gpu_info
+
+        await asyncio.to_thread(gpu_info)
         jobs.start(asyncio.get_running_loop())
         store.purge_expired(
             idle_seconds=settings.session_idle_minutes * 60,
@@ -358,7 +363,7 @@ def create_app(settings: Settings, *, validate: bool = True) -> FastAPI:
         if not path.is_file() or doc.dir.resolve() not in path.parents:
             raise HTTPException(404)
         media = "text/plain; charset=utf-8"
-        if key == "original" or key == "ocr_pdf":
+        if key in ("original", "ocr_pdf", "compressed"):
             media = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
         if key == "report":
             media = "application/json"
@@ -649,6 +654,125 @@ def create_app(settings: Settings, *, validate: bool = True) -> FastAPI:
         store.audit("delete", f"{user.login}: {doc_id} ({doc.title})")
         return _back(request, "/", {"ok": True})
 
+    # -------------------------------------------------------------- preview / compress
+    def _plan_reprocess(doc, ocr: str) -> dict:
+        from ..estimate import audio_minutes, estimate, pdf_page_count
+        from ..resources import gpu_info
+
+        extract = _extract_for(settings, ocr)
+        original = doc.dir / doc.outputs.get("original", "")
+        pages = doc.pages or (pdf_page_count(original) if doc.kind == "pdf" else 0)
+        ocr_pages = None
+        if doc.kind == "pdf" and "report" in doc.outputs:
+            try:
+                rep = json.loads((doc.dir / doc.outputs["report"]).read_text())
+                ocr_pages = len(rep["stats"]["signal"]["needs_ocr_pages"])
+            except OSError, ValueError, KeyError, TypeError:
+                ocr_pages = None
+        minutes = (
+            audio_minutes(original)
+            if doc.kind in ("audio", "video") and original.is_file()
+            else 0.0
+        )
+        est = estimate(
+            doc.kind,
+            pages=pages,
+            size_bytes=doc.size,
+            audio_minutes=minutes,
+            ocr_pages=ocr_pages,
+            settings=extract,
+            timings=jobs.timings,
+            apple_silicon=gpu_info()["apple_silicon"],
+        )
+        return {
+            "op": "reprocess",
+            "ocr": extract.ocr,
+            "estimate": est.to_dict(),
+            "outputs": ["layout", "markdown", "text", "report"]
+            + (
+                ["ocr_pdf"]
+                if extract.ocr != "off" and (ocr_pages or extract.ocr == "force")
+                else []
+            ),
+        }
+
+    @app.get("/doc/{doc_id}/plan")
+    def plan(
+        doc_id: str,
+        op: str = "reprocess",
+        ocr: str = "auto",
+        strength: int = 50,
+        engine: str = "auto",
+        user: User = Depends(require_user),
+    ):
+        """Dry run: what an operation would do, how long it should take, what it would write."""
+        doc = store.get(doc_id)
+        if not doc:
+            raise HTTPException(404)
+        if op == "compress":
+            if doc.kind != "pdf":
+                raise HTTPException(400, "only PDFs can be compressed")
+            from ..compress import preview
+
+            src = doc.dir / doc.outputs.get("ocr_pdf", doc.outputs.get("original", ""))
+            try:
+                return {"op": "compress"} | preview(src, strength, engine=engine).to_dict()
+            except Exception as exc:
+                raise HTTPException(400, f"preview failed: {exc}") from exc
+        return _plan_reprocess(doc, ocr)
+
+    @app.get("/doc/{doc_id}/compress", response_class=HTMLResponse)
+    def compress_page(
+        request: Request,
+        doc_id: str,
+        strength: int = 50,
+        engine: str = "auto",
+        user: User = Depends(require_user),
+    ):
+        doc = store.get(doc_id)
+        if not doc or doc.kind != "pdf":
+            raise HTTPException(404)
+        from ..compress import PRESETS, preview
+
+        src = doc.dir / doc.outputs.get("ocr_pdf", doc.outputs.get("original", ""))
+        plan_d = None
+        error = ""
+        try:
+            plan_d = preview(src, strength, engine=engine).to_dict()
+        except Exception as exc:  # noqa: BLE001
+            error = str(exc)
+        return render(
+            request,
+            "compress.html",
+            user,
+            doc=doc,
+            strength=strength,
+            engine=engine,
+            plan=plan_d,
+            error=error,
+            presets=PRESETS,
+        )
+
+    @app.post("/doc/{doc_id}/compress")
+    def compress_run(
+        request: Request,
+        doc_id: str,
+        csrf: str = Form(""),
+        strength: int = Form(50),
+        engine: str = Form("auto"),
+        user: User = Depends(require_user),
+    ):
+        csrf_check(request, user, csrf)
+        doc = store.get(doc_id)
+        if not doc or doc.kind != "pdf":
+            raise HTTPException(404)
+        if engine not in ("auto", "pymupdf", "ghostscript"):
+            raise HTTPException(400, "bad engine")
+        if not jobs.submit_compress(doc_id, max(0, min(strength, 100)), engine):
+            raise HTTPException(409, "already processing")
+        store.audit("compress.start", f"{user.login}: {doc_id} strength={strength}")
+        return _back(request, f"/doc/{doc_id}", {"ok": True})
+
     # -------------------------------------------------------------- system
     @app.get("/api/system")
     def api_system(user: User = Depends(require_user)):
@@ -809,6 +933,7 @@ def _download_name(doc, key: str, path: Path) -> str:
         "text": ".txt",
         "report": ".json",
         "ocr_pdf": ".ocr.pdf",
+        "compressed": ".compressed.pdf",
     }.get(key, path.suffix)
     if key == "original":
         return doc.original_name
