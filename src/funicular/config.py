@@ -99,6 +99,8 @@ class Settings(BaseModel):
     max_batch_files: int = 50_000
     icloud_wait_seconds: int = 900
     icloud_evict_after: bool = False
+    # Search: embeddings backend (auto | sentence-transformers | model2vec | none)
+    embeddings: str = "auto"
     watch_inbox: bool = False
     # Behind Tailscale Serve / Caddy: trust X-Forwarded-Proto from the loopback proxy only.
     trust_proxy: bool = False
@@ -146,6 +148,7 @@ class Settings(BaseModel):
             max_batch_files=_env_int("MAX_BATCH_FILES", 50_000),
             icloud_wait_seconds=_env_int("ICLOUD_WAIT_SECONDS", 900),
             icloud_evict_after=_env_bool("ICLOUD_EVICT_AFTER", False),
+            embeddings=_env("EMBEDDINGS", "auto") or "auto",
             watch_inbox=_env_bool("WATCH_INBOX", False),
             trust_proxy=_env_bool("TRUST_PROXY", False),
         )

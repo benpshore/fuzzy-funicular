@@ -4,19 +4,28 @@
 <h1 class="h1">Search</h1>
 <form class="card searchbar" method="get" action="/search" role="search">
   <label class="vh" for="q">Search text</label>
-  <input class="input" id="q" name="q" type="search" value="{{ q }}" placeholder="Words in any document" autocomplete="off" autofocus>
+  <input class="input" id="q" name="q" type="search" value="{{ q }}" placeholder="Words, jargon, or a rough description" autocomplete="off" autocapitalize="none" spellcheck="false" autofocus>
   <button class="btn btn-primary" type="submit">Search</button>
+  <details class="adv"><summary>Advanced</summary>
+    <fieldset class="row"><legend class="label">Mode</legend>
+      <label class="choice"><input type="radio" name="mode" value="auto" {% if mode == 'auto' %}checked{% endif %}> Auto (keywords + meaning)</label>
+      <label class="choice"><input type="radio" name="mode" value="keyword" {% if mode == 'keyword' %}checked{% endif %}> Keywords only</label>
+      <label class="choice"><input type="radio" name="mode" value="semantic" {% if mode == 'semantic' %}checked{% endif %}> Meaning only</label>
+    </fieldset>
+    <p class="muted small">Index: {{ stats.documents }} documents, {{ stats.chunks }} passages{% if stats.embedding_model %}, meaning search via {{ stats.embedding_model }}{% else %}, meaning search off (install the search or docling extra){% endif %}.</p>
+  </details>
 </form>
 {% if q %}
-<p class="muted">{{ results|length }} result{{ 's' if results|length != 1 }} for “{{ q }}”</p>
+<p class="muted">{{ results|length }} result{{ 's' if results|length != 1 }} for “{{ q }}”{% if info and info.expansions %} · also tried: {% for k, v in info.expansions.items() %}<em>{{ k }}</em> → {{ v|join(', ') }}{% if not loop.last %}; {% endif %}{% endfor %}{% endif %}{% if info %} · {{ info.seconds }} s{% endif %}</p>
 <ul class="list">
-  {% for d, snip in results %}
+  {% for d, h in results %}
   <li class="row-item" data-doc-id="{{ d.id }}">
-    <a class="row-link" href="/doc/{{ d.id }}">
+    <span class="pick"></span>
+    <a class="row-link" href="/doc/{{ d.id }}{% if h and h.page %}?view=layout#page-{{ h.page }}{% endif %}">
       <span class="row-main">
-        <span class="row-title">{{ d.title }}</span>
-        <span class="row-sub muted">{{ d.kind|upper }} · {{ d.created_at|when }}{% if d.tags %} · {{ d.tags|join(', ') }}{% endif %}</span>
-        <span class="snippet">{{ snip }}</span>
+        <span class="row-title">{{ icon(d.kind) }} {{ d.title }}</span>
+        <span class="row-sub muted">{{ d.kind|upper }} · {{ d.created_at|when }}{% if h and h.page %} · page {{ h.page }}{% endif %}{% if h %} · {{ h.routes|join(' + ') }}{% endif %}{% if d.tags %} · {{ d.tags[:4]|join(', ') }}{% endif %}</span>
+        {% if h %}<span class="snippet">{{ h.snippet }}</span>{% endif %}
       </span>
       <span class="chev" aria-hidden="true">›</span>
     </a>

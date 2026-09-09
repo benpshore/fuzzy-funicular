@@ -20,12 +20,31 @@ from ..config import ExtractSettings, Settings
 from ..estimate import Timings
 from ..pipeline import ingest
 from ..resources import Cancelled, JobContext, MemoryGuard, SystemMonitor, current_job
+from ..search import SearchIndex
 from .store import Store
 
 log = logging.getLogger(__name__)
 
-STAGE_BASE = {"detect": 0, "ocr": 8, "layout": 45, "markdown": 55, "text": 92, "docling": 0}
-STAGE_SPAN = {"detect": 8, "ocr": 37, "layout": 10, "markdown": 37, "text": 6, "docling": 98}
+STAGE_BASE = {
+    "detect": 0,
+    "ocr": 8,
+    "layout": 42,
+    "markdown": 52,
+    "text": 86,
+    "docling": 0,
+    "index": 90,
+    "publish": 97,
+}
+STAGE_SPAN = {
+    "detect": 8,
+    "ocr": 34,
+    "layout": 10,
+    "markdown": 34,
+    "text": 4,
+    "docling": 88,
+    "index": 7,
+    "publish": 2,
+}
 STAGE_LABEL = {
     "queued": "Queued",
     "detect": "Checking pages",
@@ -34,6 +53,7 @@ STAGE_LABEL = {
     "markdown": "Reading order",
     "text": "Plain text",
     "docling": "Converting",
+    "index": "Indexing for search",
     "publish": "Saving to iCloud",
     "done": "Done",
     "failed": "Failed",
@@ -65,6 +85,7 @@ class JobManager:
         )
         self.stopping = False
         self.timings = Timings(settings.data_dir / "timings.json")
+        self.index = SearchIndex(settings.data_dir / "search.sqlite3", embed=settings.embeddings)
 
     # ------------------------------------------------------------------ lifecycle
     def start(self, loop: asyncio.AbstractEventLoop) -> None:
@@ -448,6 +469,7 @@ class JobManager:
 
     def _run_job(self, doc_id: str, doc, ctx: JobContext, extract: ExtractSettings) -> None:
         last = {"t": 0.0}
+        finished = False
         clock: dict[str, float] = {}
 
         def progress(stage: str, done: int, total: int) -> None:
@@ -519,15 +541,32 @@ class JobManager:
                 outputs=outputs,
                 body_text=body,
             )
-            progress("publish", 0, 1)
+            finished = True
+            # Everything from here on is additive (search index, iCloud archive, eviction):
+            # a cancel or an error must never flip a finished document back to failed.
             try:
+                progress("index", 0, 1)
+                final = self.store.get(doc_id)
+                t_ix = time.monotonic()
+                n_chunks = self.index.index_document(
+                    doc_id, final.title if final else doc.title, body
+                )
+                self.timings.record("embed", time.monotonic() - t_ix, max(n_chunks, 1))
+            except Cancelled:
+                log.info("indexing of %s skipped: cancelled", doc_id)
+            except Exception as exc:  # search is additive; never fail the document for it
+                log.warning("indexing failed for %s: %s", doc_id, exc)
+            try:
+                progress("publish", 0, 1)
                 publish_to_archive(self.settings, self.store.get(doc_id))
+                if self.settings.icloud_evict_after:
+                    from ..icloud import evict
+
+                    evict(original)
+            except Cancelled:
+                log.info("archive publish of %s skipped: cancelled", doc_id)
             except Exception as exc:  # archive is best effort (iCloud may be offline)
                 log.warning("archive publish failed for %s: %s", doc_id, exc)
-            if self.settings.icloud_evict_after:
-                from ..icloud import evict
-
-                evict(original)
             self._publish(
                 {
                     "type": "done",
@@ -540,8 +579,28 @@ class JobManager:
                     "warnings": res.warnings,
                 }
             )
+        except Cancelled as exc:
+            log.info("job %s cancelled: %s", doc_id, exc)
+            ctx.kill_children()
+            if finished:
+                return
+            self.store.fail(doc_id, f"Cancelled: {exc}")
+            self._publish(
+                {
+                    "type": "failed",
+                    "id": doc_id,
+                    "status": "failed",
+                    "stage": "failed",
+                    "label": "Cancelled",
+                    "progress": 0,
+                    "error": str(exc)[:300],
+                }
+            )
         except Exception as exc:
             log.exception("ingest failed for %s", doc_id)
+            ctx.kill_children()
+            if finished:
+                return
             self.store.fail(doc_id, f"{type(exc).__name__}: {exc}")
             self._publish(
                 {
