@@ -50,3 +50,10 @@ def test_compress_and_estimate_commands(fixtures, tmp_path):
         app, ["estimate", str(fixtures["scholarly"]), str(fixtures["md"]), "--ocr", "auto"]
     )
     assert r.exit_code == 0 and "total" in r.output
+
+
+def test_models_status_command(tmp_path, monkeypatch):
+    monkeypatch.setenv("DOCLING_ARTIFACTS_PATH", str(tmp_path / "d"))
+    monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path / "hf"))
+    r = runner.invoke(app, ["models", "status"])
+    assert r.exit_code == 0 and "whisper" in r.output

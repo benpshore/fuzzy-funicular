@@ -66,6 +66,7 @@ def build_converter(settings: ExtractSettings):
     would silently download models)."""
     import sys
 
+    from docling.datamodel.accelerator_options import AcceleratorDevice, AcceleratorOptions
     from docling.datamodel.base_models import InputFormat
     from docling.datamodel.pipeline_options import (
         AsrPipelineOptions,
@@ -78,9 +79,18 @@ def build_converter(settings: ExtractSettings):
         PdfFormatOption,
     )
 
+    from .resources import preferred_torch_device
+
+    device = {"mps": AcceleratorDevice.MPS, "cuda": AcceleratorDevice.CUDA}.get(
+        preferred_torch_device(), AcceleratorDevice.CPU
+    )
+    accel = AcceleratorOptions(device=device)
+
     asr = AsrPipelineOptions(asr_options=_asr_options(settings.asr_model))
+    asr.accelerator_options = accel
 
     pdf_opts = PdfPipelineOptions()
+    pdf_opts.accelerator_options = accel
     pdf_opts.do_ocr = settings.ocr != "off"
     if pdf_opts.do_ocr and sys.platform == "darwin":
         try:
@@ -95,7 +105,9 @@ def build_converter(settings: ExtractSettings):
         InputFormat.PDF: PdfFormatOption(pipeline_options=pdf_opts),
         InputFormat.IMAGE: ImageFormatOption(pipeline_options=pdf_opts),
     }
-    return DocumentConverter(format_options=format_options)
+    conv = DocumentConverter(format_options=format_options)
+    conv._funicular_device = device.value  # noqa: SLF001 - our own annotation for reports
+    return conv
 
 
 def convert(
@@ -132,7 +144,10 @@ def convert(
         pages = len(doc.pages) if getattr(doc, "pages", None) else 0
     except Exception:
         pages = 0
-    meta = {"origin": getattr(getattr(doc, "origin", None), "filename", None)}
+    meta = {
+        "origin": getattr(getattr(doc, "origin", None), "filename", None),
+        "device": str(getattr(converter, "_funicular_device", "")),
+    }
     if progress:
         progress("docling", 1, 1)
     return DoclingResult(

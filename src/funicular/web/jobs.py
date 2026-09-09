@@ -491,6 +491,23 @@ class JobManager:
             outputs = {k: str(v.relative_to(doc.dir)) for k, v in res.outputs.items()}
             outputs["original"] = original.name
             title = res.title if doc.title == doc.original_name and res.title else None
+            try:
+                from ..autotag import auto_tags
+
+                signal = res.stats.get("signal") or {}
+                auto = auto_tags(
+                    body,
+                    kind=doc.kind,
+                    title=title or doc.title,
+                    metadata={"year": (res.stats.get("info") or {}).get("year")},
+                    hints=[t for t in doc.tags if ":" in t],
+                    scanned=bool(signal.get("is_scanned_document")),
+                    ocr_used=bool(res.stats.get("ocr_pages")) or "ocr_backend" in res.stats,
+                )
+                keep = [t for t in doc.tags if t not in auto.tags]
+                self.store.set_tags(doc_id, auto.tags + keep)
+            except Exception as exc:  # tags are a convenience, never a failure
+                log.warning("auto-tag failed for %s: %s", doc_id, exc)
             self.store.finish(
                 doc_id,
                 title=title,
