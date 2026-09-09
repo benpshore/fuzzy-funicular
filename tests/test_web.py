@@ -806,3 +806,66 @@ def test_scholar_lookup_and_references(client, fixtures, monkeypatch):
         f"/doc/{doc_id}/scholar/verify", data={"csrf": csrf}, headers={"Accept": "application/json"}
     )
     assert r.status_code == 200 and r.json()["resolution"]["verified"]
+
+
+def test_summarize_and_ask_with_fake_provider(client, fixtures):
+    from test_llm import FakeProvider
+
+    fake = FakeProvider()
+    client.app.state.jobs.provider_factory = lambda name=None: fake
+    csrf = sign_in(client)
+    r = client.post(
+        "/upload",
+        files=[("files", ("s.pdf", fixtures["scholarly"].read_bytes(), "application/pdf"))],
+        data={"csrf": csrf},
+        headers={"Accept": "application/json"},
+    )
+    doc_id = r.json()["created"][0]["id"]
+    wait_done(client, doc_id)
+    r = client.post(
+        f"/doc/{doc_id}/summarize",
+        data={"csrf": csrf, "provider": "anthropic"},
+        headers={"Accept": "application/json"},
+    )
+    assert r.status_code == 200
+    deadline = time.time() + 60
+    while time.time() < deadline:
+        s = client.get(f"/doc/{doc_id}/summary").json()
+        if s.get("card"):
+            break
+        time.sleep(0.2)
+    assert s["card"]["one_line"].startswith("Riluzole") and s["provider"] == "fake"
+    d = client.get(f"/api/docs/{doc_id}").json()
+    assert "riluzole" in [t.lower() for t in d["tags"]]
+    r = client.get(f"/doc/{doc_id}")
+    assert "Evidence card" in r.text and "HR 0.84" in r.text
+    r = client.post(
+        "/ask",
+        data={"csrf": csrf, "question": "riluzole survival", "provider": "auto"},
+        headers={"Accept": "application/json"},
+    )
+    body = r.json()
+    assert body["citations"] and body["citations"][0]["doc_id"] == doc_id
+    assert f"[{doc_id} p." in body["text"]
+    r = client.get(f"/ask?doc_id={doc_id}")
+    assert r.status_code == 200 and "Ask Claude" in r.text
+    r = client.post(
+        "/ask",
+        data={"csrf": csrf, "question": "", "provider": "auto"},
+        headers={"Accept": "application/json"},
+    )
+    assert r.status_code == 400
+
+
+def test_ask_without_provider_is_503(client, monkeypatch):
+    from funicular.llm import LLMUnavailable
+
+    def boom(name=None):
+        raise LLMUnavailable("no LLM configured")
+
+    client.app.state.jobs.provider_factory = boom
+    csrf = sign_in(client)
+    r = client.post(
+        "/ask", data={"csrf": csrf, "question": "anything"}, headers={"Accept": "application/json"}
+    )
+    assert r.status_code == 503 and "no LLM" in r.json()["error"]

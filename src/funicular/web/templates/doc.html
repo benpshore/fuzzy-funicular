@@ -29,6 +29,34 @@
   {% endif %}
 </div>
 
+<section class="card" aria-labelledby="sum-h">
+  <h2 id="sum-h" class="h2">Evidence card</h2>
+  {% if summary and summary.card %}
+  {% set c = summary.card %}
+  <p><strong>{{ c.one_line }}</strong></p>
+  <dl class="kv">
+    {% for key, label in [('study_type','Design'),('question','Question'),('population','Population'),('sample_size','Sample'),('intervention','Intervention'),('comparator','Comparator'),('funding_conflicts','Funding / conflicts'),('confidence','Confidence')] %}
+    {% if c.get(key) %}<dt>{{ label }}</dt><dd>{{ c.get(key) }}</dd>{% endif %}
+    {% endfor %}
+    {% if c.get('primary_outcomes') %}<dt>Primary outcomes</dt><dd><ul>{% for o in c.primary_outcomes %}<li>{{ o }}</li>{% endfor %}</ul></dd>{% endif %}
+    {% if c.get('key_findings') %}<dt>Key findings</dt><dd><ul>{% for f in c.key_findings %}<li>{% if f is mapping %}{{ f.get('finding') }} <span class="muted small">p.{{ f.get('pages') }}</span>{% else %}{{ f }}{% endif %}</li>{% endfor %}</ul></dd>{% endif %}
+    {% if c.get('effect_sizes') %}<dt>Effects</dt><dd><ul>{% for e in c.effect_sizes %}<li>{% if e is mapping %}{{ e.get('measure') }}: {{ e.get('value') }}{% if e.get('ci') %} ({{ e.get('ci') }}){% endif %} <span class="muted small">p.{{ e.get('pages') }}</span>{% else %}{{ e }}{% endif %}</li>{% endfor %}</ul></dd>{% endif %}
+    {% if c.get('limitations') %}<dt>Limitations</dt><dd><ul>{% for l in c.limitations %}<li>{{ l }}</li>{% endfor %}</ul></dd>{% endif %}
+    {% if c.get('coverage_note') %}<dt>Coverage</dt><dd>{{ c.coverage_note }}</dd>{% endif %}
+  </dl>
+  <p class="muted small">{{ summary.provider }} / {{ summary.model }} · {{ summary.chunks_used }} of {{ summary.chunks_total }} sections · {{ summary.input_tokens + summary.output_tokens }} tokens · {{ summary.seconds|round(0)|int }} s</p>
+  {% else %}
+  <p class="muted">No summary yet.</p>
+  {% endif %}
+  {% if doc.status == 'done' %}
+  <form method="post" action="/doc/{{ doc.id }}/summarize" class="chips">
+    <input type="hidden" name="csrf" value="{{ user.csrf }}">
+    {% for p in providers %}{% if p.configured %}<button class="chip" type="submit" name="provider" value="{{ p.name }}">Summarise with {% if p.name == 'anthropic' %}Claude{% elif p.name == 'openai' %}ChatGPT{% else %}{{ p.name }}{% endif %}</button>{% endif %}{% endfor %}
+  </form>
+  <p><a class="btn btn-secondary" href="/ask?doc_id={{ doc.id }}">Ask about this document…</a></p>
+  {% endif %}
+</section>
+
 {% if doc.kind == 'pdf' %}
 <section class="card" aria-labelledby="sch-h">
   <h2 id="sch-h" class="h2">Scholarly record</h2>
@@ -71,7 +99,7 @@
     <section class="card" aria-labelledby="files-h">
       <h2 id="files-h" class="h2">Files</h2>
       <ul class="list plain">
-        {% for key, label in [('layout','Layout text (.layout.txt)'),('markdown','Markdown (.md)'),('text','Plain text (.txt)'),('ocr_pdf','Searchable PDF'),('compressed','Compressed PDF'),('report','Report (.json)'),('scholar','Scholarly record (.json)'),('references','References (.json)'),('original','Original')] %}
+        {% for key, label in [('layout','Layout text (.layout.txt)'),('markdown','Markdown (.md)'),('text','Plain text (.txt)'),('ocr_pdf','Searchable PDF'),('compressed','Compressed PDF'),('report','Report (.json)'),('scholar','Scholarly record (.json)'),('summary','Evidence card (.json)'),('references','References (.json)'),('original','Original')] %}
         {% if key in doc.outputs %}
         <li><a class="row-link" href="/doc/{{ doc.id }}/file/{{ key }}?download=1"><span class="row-main">{{ label }}</span><span class="chev" aria-hidden="true">⤓</span></a></li>
         {% endif %}

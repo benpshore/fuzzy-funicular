@@ -365,6 +365,81 @@ def scholar_rename(
         f.close()
 
 
+@app.command()
+def summarize(
+    source: Annotated[
+        Path, typer.Argument(exists=True, dir_okay=False, help="PDF or extracted .txt/.md")
+    ],
+    provider: Annotated[
+        str, typer.Option(help="auto | anthropic | openai | github | ollama | lmstudio")
+    ] = "auto",
+    out: Annotated[Path | None, typer.Option("-o", "--out", help="Write the card as JSON")] = None,
+) -> None:
+    """Consensus-style evidence card for one document (needs an LLM provider configured)."""
+    from .llm import LLMUnavailable, get_provider
+    from .summarize import summarize as _summarize
+
+    if source.suffix.lower() == ".pdf":
+        import pymupdf
+
+        with pymupdf.open(source) as doc:
+            text = "\f".join(p.get_text("text") for p in doc)
+    else:
+        text = source.read_text(encoding="utf-8", errors="replace")
+    try:
+        prov = get_provider(None if provider == "auto" else provider)
+    except LLMUnavailable as exc:
+        err.print(f"[red]{exc}")
+        raise typer.Exit(code=2) from exc
+    summary = _summarize(
+        text,
+        prov,
+        title=source.stem,
+        progress=lambda s, d, t: err.print(f"  {s} {d}/{t}", end="\r"),
+    )
+    if out:
+        out.write_text(json.dumps(summary.to_dict(), ensure_ascii=False, indent=1))
+    console.print_json(json.dumps(summary.card, ensure_ascii=False))
+    err.print(
+        f"{summary.provider}/{summary.model}: {summary.input_tokens}+{summary.output_tokens} tokens, "
+        f"{summary.seconds:.0f}s"
+    )
+
+
+@app.command()
+def ask(
+    question: Annotated[str, typer.Argument()],
+    provider: Annotated[str, typer.Option()] = "auto",
+    limit: Annotated[int, typer.Option(help="passages to send")] = 12,
+) -> None:
+    """Answer a question from the library index (the web app must have indexed documents)."""
+    from .llm import LLMUnavailable, get_provider
+    from .search import SearchIndex
+    from .summarize import ask as _ask
+
+    settings = Settings.from_env()
+    index = SearchIndex(settings.data_dir / "search.sqlite3", embed=settings.embeddings)
+    hits, _ = index.search(question, limit=limit)
+    passages = []
+    with index._conn() as c:  # noqa: SLF001
+        for h in hits:
+            row = c.execute(
+                "SELECT text FROM chunks WHERE doc_id=? AND idx=?", (h.doc_id, h.idx)
+            ).fetchone()
+            if row:
+                passages.append(
+                    {"doc_id": h.doc_id, "title": h.title, "page": h.page, "text": row["text"]}
+                )
+    try:
+        prov = get_provider(None if provider == "auto" else provider)
+    except LLMUnavailable as exc:
+        err.print(f"[red]{exc}")
+        raise typer.Exit(code=2) from exc
+    a = _ask(question, passages, prov)
+    console.print(a.text)
+    err.print(f"[dim]{a.provider}/{a.model}, {len(a.citations)} passages, {a.seconds:.1f}s")
+
+
 models_app = typer.Typer(help="Pre-fetch and inspect ML models (docling, Whisper, embeddings).")
 app.add_typer(models_app, name="models")
 

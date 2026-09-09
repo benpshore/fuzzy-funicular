@@ -218,3 +218,7 @@ fieldset.row { border: 0; padding: 0; margin: 0; display: flex; flex-wrap: wrap;
 
 .refs { padding-left: 22px; font-size: 15px; }
 .refs li { margin: 6px 0; overflow-wrap: anywhere; }
+
+.answer { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.5; }
+.chip-ok { border: 1px solid var(--accent); }
+textarea.input { min-height: 96px; resize: vertical; font-family: var(--font); }

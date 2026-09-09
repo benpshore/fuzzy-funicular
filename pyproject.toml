@@ -52,7 +52,9 @@ search = ["model2vec>=0.9.0"]
 scholar = ["feedparser>=6.0.14", "httpx>=0.28.1"]
 # MCP server for Claude Desktop / ChatGPT desktop.
 mcp = ["mcp>=2.2.0"]
-all = ["fuzzy-funicular[ocr,docling,web,search,scholar,mcp]"]
+# LLM summarisation and Ask: Anthropic SDK; OpenAI-compatible endpoints use httpx directly.
+llm = ["anthropic>=1.4.0", "httpx>=0.28.1"]
+all = ["fuzzy-funicular[ocr,docling,web,search,scholar,mcp,llm]"]
 
 [project.scripts]
 funicular = "funicular.cli:app"

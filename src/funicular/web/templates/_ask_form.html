@@ -1,0 +1,22 @@
+<form class="card stack" method="post" action="/ask" id="ask-form">
+  <input type="hidden" name="csrf" value="{{ user.csrf }}">
+  {% if doc %}<input type="hidden" name="doc_id" value="{{ doc.id }}">{% endif %}
+  <label class="label" for="question">{% if doc %}Ask about this document{% else %}Ask across the library{% endif %}</label>
+  <textarea class="input" id="question" name="question" rows="3" required maxlength="2000" placeholder="e.g. What was the primary endpoint and the absolute effect?">{{ answer.question if answer else '' }}</textarea>
+  <div class="chips" role="group" aria-label="Ask with">
+    {% for p in providers %}
+    <button class="chip {% if p.configured %}chip-ok{% endif %}" type="submit" name="provider" value="{{ p.name }}" {% if not p.configured %}aria-disabled="true" title="not configured"{% endif %}>
+      {% if p.name == 'anthropic' %}Ask Claude{% elif p.name == 'openai' %}Ask ChatGPT{% elif p.name == 'github' %}Ask GitHub Models{% elif p.name == 'ollama' %}Ask Ollama (local){% else %}Ask LM Studio (local){% endif %}
+    </button>
+    {% endfor %}
+  </div>
+  <p class="muted small">Answers are grounded in passages from your own documents and cite them as [doc p.N]. Nothing leaves the Mac except the passages sent to the chosen provider. For a full chat session, add the MCP server (<code>funicular mcp</code>) to Claude Desktop or ChatGPT.</p>
+</form>
+{% if answer %}
+<section class="card" aria-live="polite">
+  <h2 class="h2">Answer · {{ answer.provider }} / {{ answer.model }} · {{ answer.seconds|round(1) }} s</h2>
+  {% if answer.refused %}<p class="bad">The provider declined to answer this question.</p>{% endif %}
+  <div class="answer">{{ answer.text }}</div>
+  {% if answer.citations %}<p class="muted small">Passages: {% for c in answer.citations %}<a href="/doc/{{ c.doc_id }}">{{ c.title or c.doc_id }}{% if c.page %} p.{{ c.page }}{% endif %}</a>{% if not loop.last %} · {% endif %}{% endfor %}</p>{% endif %}
+</section>
+{% endif %}
