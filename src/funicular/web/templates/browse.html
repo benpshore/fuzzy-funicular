@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block title %}Folders · Funicular{% endblock %}
+{% block content %}
+<p><a class="back" href="/">‹ Library</a></p>
+<h1 class="h1">Folders</h1>
+<p class="muted small">Pick a folder on this Mac (Home, iCloud Drive, external volumes). Files are copied in; the originals stay where they are.</p>
+{% if listing.path %}
+<p class="crumbs"><a class="btn btn-quiet" href="/browse">All places</a>{% if listing.parent %}<a class="btn btn-quiet" href="/browse?path={{ listing.parent|urlencode }}">‹ Up</a>{% endif %}<code>{{ listing.path }}</code></p>
+<form class="card stack" method="post" action="/import/folder">
+  <input type="hidden" name="csrf" value="{{ user.csrf }}">
+  <input type="hidden" name="path" value="{{ listing.path }}">
+  <fieldset class="row"><legend class="label">Import this folder</legend>
+    <label class="choice"><input type="checkbox" name="recursive" value="yes" checked> Include sub-folders and archives</label>
+  </fieldset>
+  <fieldset class="row"><legend class="label">OCR</legend>
+    <label class="choice"><input type="radio" name="ocr" value="off" {% if ocr_default == 'off' %}checked{% endif %}> Off</label>
+    <label class="choice"><input type="radio" name="ocr" value="auto" {% if ocr_default == 'auto' %}checked{% endif %}> Only where needed</label>
+    <label class="choice"><input type="radio" name="ocr" value="force" {% if ocr_default == 'force' %}checked{% endif %}> Everything</label>
+  </fieldset>
+  <button class="btn btn-primary" type="submit">Import folder</button>
+</form>
+{% endif %}
+<ul class="list">
+  {% for e in listing.entries %}
+  <li class="row-item">
+    {% if e.is_dir %}
+    <a class="row-link" href="/browse?path={{ e.path|urlencode }}"><span class="row-main"><span class="row-title">{{ icon('folder') }} {{ e.name }}</span></span><span class="chev" aria-hidden="true">›</span></a>
+    {% else %}
+    <div class="row-link">
+      <span class="row-main"><span class="row-title">{{ icon(e.kind) }} {{ e.name }}</span>
+        <span class="row-sub muted">{{ e.kind|upper }} · {{ e.size|human_size }}{% if e.dataless %} · in iCloud, not downloaded{% endif %}</span></span>
+      {% if e.compatible %}
+      <form method="post" action="/import/file"><input type="hidden" name="csrf" value="{{ user.csrf }}"><input type="hidden" name="path" value="{{ e.path }}"><button class="btn btn-secondary" type="submit">Import</button></form>
+      {% endif %}
+    </div>
+    {% endif %}
+  </li>
+  {% else %}<li class="card empty">Empty folder.</li>{% endfor %}
+</ul>
+{% if listing.truncated %}<p class="muted">Showing the first entries only.</p>{% endif %}
+{% endblock %}

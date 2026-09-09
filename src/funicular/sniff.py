@@ -17,6 +17,7 @@ class Kind(StrEnum):
     HTML = "html"
     TEXT = "text"  # md/txt/csv
     EPUB = "epub"
+    ARCHIVE = "archive"  # zip / tar / gzip container that is not an Office or EPUB document
     UNKNOWN = "unknown"
 
 
@@ -25,6 +26,7 @@ AUDIO_EXT = {"wav", "mp3", "m4a", "aac", "ogg", "flac", "aiff", "aif", "caf", "o
 VIDEO_EXT = {"mp4", "mov", "mkv", "webm", "avi", "m4v"}
 OFFICE_EXT = {"docx", "dotx", "docm", "pptx", "potx", "ppsx", "xlsx", "xlsm", "odt", "ods", "odp"}
 HTML_EXT = {"html", "htm", "xhtml"}
+ARCHIVE_EXT = {"zip", "tar", "tgz", "gz", "bz2", "tbz2", "xz", "txz"}
 TEXT_EXT = {"md", "markdown", "txt", "text", "csv", "adoc", "asciidoc", "tex", "vtt"}
 
 
@@ -33,6 +35,34 @@ class Sniffed:
     kind: Kind
     ext: str  # normalised, lowercase, no dot
     mismatch: bool = False  # extension said one thing, magic bytes another
+
+
+_ZIP_PATH: str | None = None  # set by sniff() so _zip_kind can look inside the container
+
+
+def _zip_kind(ext: str) -> Kind:
+    """Office and EPUB files are zips; decide by the container's own manifest, not the name."""
+    if ext in ("docx", "dotx", "docm", "pptx", "potx", "ppsx", "xlsx", "xlsm"):
+        return Kind.OFFICE
+    if ext == "epub":
+        return Kind.EPUB
+    if _ZIP_PATH:
+        import zipfile
+
+        try:
+            with zipfile.ZipFile(_ZIP_PATH) as zf:
+                names = zf.namelist()[:64]
+                if "[Content_Types].xml" in names:
+                    return Kind.OFFICE
+                if "mimetype" in names:
+                    mt = zf.read("mimetype")[:64]
+                    if mt.startswith(b"application/epub"):
+                        return Kind.EPUB
+                    if mt.startswith(b"application/vnd.oasis.opendocument"):
+                        return Kind.OFFICE
+        except zipfile.BadZipFile, OSError, KeyError:
+            pass
+    return Kind.ARCHIVE
 
 
 def _magic_kind(head: bytes, ext: str) -> Kind | None:
@@ -67,9 +97,9 @@ def _magic_kind(head: bytes, ext: str) -> Kind | None:
         # isom/mp42/qt: could be audio-only m4a or video; let the extension decide.
         return Kind.AUDIO if ext in AUDIO_EXT else Kind.VIDEO
     if head[:4] == b"PK\x03\x04":
-        if ext == "epub":
-            return Kind.EPUB
-        return Kind.OFFICE
+        return _zip_kind(ext)
+    if head[:2] == b"\x1f\x8b" or head[:3] == b"BZh" or head[:6] == b"\xfd7zXZ\x00":
+        return Kind.ARCHIVE
     if head[:4] == b"\x1a\x45\xdf\xa3":  # Matroska / WebM
         return Kind.VIDEO
     lowered = head[:512].lstrip().lower()
@@ -79,13 +109,25 @@ def _magic_kind(head: bytes, ext: str) -> Kind | None:
 
 
 def sniff(path: Path) -> Sniffed:
+    global _ZIP_PATH
     ext = path.suffix.lower().lstrip(".")
+    if ext == "gz" and path.name.lower().endswith(".tar.gz"):
+        ext = "tgz"
     try:
         with path.open("rb") as fh:
             head = fh.read(1024)
+            fh.seek(257)
+            tar_magic = fh.read(5)
     except OSError:
         head = b""
-    by_magic = _magic_kind(head, ext)
+        tar_magic = b""
+    _ZIP_PATH = str(path)
+    try:
+        by_magic = _magic_kind(head, ext)
+    finally:
+        _ZIP_PATH = None
+    if by_magic is None and tar_magic == b"ustar":
+        by_magic = Kind.ARCHIVE
     by_ext = _ext_kind(ext)
     if by_magic is None:
         # Text formats have no magic; accept the extension if the bytes look like text.
@@ -115,6 +157,8 @@ def _ext_kind(ext: str) -> Kind:
         return Kind.TEXT
     if ext == "epub":
         return Kind.EPUB
+    if ext in ARCHIVE_EXT:
+        return Kind.ARCHIVE
     return Kind.UNKNOWN
 
 

@@ -1,7 +1,8 @@
 <li class="row-item status-{{ d.status }}" data-doc-id="{{ d.id }}">
+  <label class="pick"><input type="checkbox" name="ids" value="{{ d.id }}" aria-label="Select {{ d.title }}"></label>
   <a class="row-link" href="/doc/{{ d.id }}">
     <span class="row-main">
-      <span class="row-title">{{ d.title }}</span>
+      <span class="row-title">{{ icon(d.kind) }} {{ d.title }}</span>
       <span class="row-sub muted">{{ d.kind|upper }} · {{ d.size|human_size }}{% if d.pages %} · {{ d.pages }} p{% endif %} · {{ d.created_at|when }}{% if d.tags %} · {{ d.tags|join(', ') }}{% endif %}</span>
     </span>
     <span class="row-side">

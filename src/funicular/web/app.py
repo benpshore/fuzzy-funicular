@@ -26,9 +26,11 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from .. import __version__
+from ..archives import build_tar_gz, is_archive
+from ..browse import BrowseError, allowed_roots, listing, resolve_safe
 from ..config import ExtractSettings, Settings
 from .auth import Auth, RateLimiter, User, client_ip
-from .importer import ImportError_, import_stream
+from .importer import ImportError_, import_path, stage_stream
 from .jobs import STAGE_LABEL, JobManager
 from .store import Store
 from .watcher import InboxWatcher
@@ -204,6 +206,10 @@ def create_app(settings: Settings, *, validate: bool = True) -> FastAPI:
     templates.env.filters["when"] = human_when
     templates.env.globals["stage_label"] = lambda s: STAGE_LABEL.get(s, s)
     templates.env.globals["version"] = __version__
+    from .icons import svg as _icon_svg
+
+    templates.env.globals["icon"] = _icon_svg
+    templates.env.filters["basename"] = lambda v: Path(str(v)).name
 
     # -------------------------------------------------------------- auth dependency
     def require_user(request: Request) -> User:
@@ -289,6 +295,11 @@ def create_app(settings: Settings, *, validate: bool = True) -> FastAPI:
     @app.get("/", response_class=HTMLResponse)
     def index(request: Request, user: User = Depends(require_user), tag: str | None = None):
         docs = store.list(limit=300, tag=tag)
+        batches = [
+            b
+            for b in store.list_batches(20)
+            if b["status"] != "done" or time.time() - b["updated_at"] < 3600
+        ]
         return render(
             request,
             "index.html",
@@ -297,6 +308,7 @@ def create_app(settings: Settings, *, validate: bool = True) -> FastAPI:
             tags=store.all_tags(),
             tag=tag,
             ocr_default=settings.extract.ocr,
+            batches=batches,
         )
 
     @app.get("/search", response_class=HTMLResponse)
@@ -407,18 +419,28 @@ def create_app(settings: Settings, *, validate: bool = True) -> FastAPI:
             raise HTTPException(429, "slow down")
         extract = _extract_for(settings, ocr)
         created, errors = [], []
-        for f in files[:50]:
+        batches = []
+        for f in files[:200]:
             name = f.filename or "upload"
             try:
+                staged, sha, size = await asyncio.to_thread(stage_stream, settings, f.file, name)
+                if _sniff_kind(staged) == "archive" and is_archive(staged):
+                    bid = jobs.submit_batch(
+                        "archive", staged, extract=extract, delete_after=True, label=name
+                    )
+                    batches.append({"id": bid, "name": name, "size": size})
+                    store.audit("upload.archive", f"{user.login}: {name} -> batch {bid}")
+                    continue
                 imported = await asyncio.to_thread(
-                    import_stream,
+                    import_path,
                     settings,
                     store,
                     jobs,
-                    f.file,
-                    name,
+                    staged,
                     source="upload",
+                    move=True,
                     extract=extract,
+                    filename=name,
                 )
                 created.append(
                     imported.doc.to_public()
@@ -430,8 +452,128 @@ def create_app(settings: Settings, *, validate: bool = True) -> FastAPI:
             finally:
                 await f.close()
         if "application/json" in request.headers.get("accept", ""):
-            return JSONResponse({"created": created, "errors": errors})
+            return JSONResponse({"created": created, "errors": errors, "batches": batches})
         return RedirectResponse("/", status_code=303)
+
+    # -------------------------------------------------------------- folders / archives
+    @app.get("/browse", response_class=HTMLResponse)
+    def browse_page(request: Request, path: str = "", user: User = Depends(require_user)):
+        try:
+            lst = listing(settings, path or None)
+        except BrowseError as exc:
+            raise HTTPException(403, str(exc)) from exc
+        return render(request, "browse.html", user, listing=lst, ocr_default=settings.extract.ocr)
+
+    @app.get("/api/browse")
+    def api_browse(path: str = "", user: User = Depends(require_user)):
+        try:
+            return listing(settings, path or None).to_dict()
+        except BrowseError as exc:
+            raise HTTPException(403, str(exc)) from exc
+
+    @app.post("/import/folder")
+    def import_folder_route(
+        request: Request,
+        csrf: str = Form(""),
+        path: str = Form(""),
+        recursive: str = Form("yes"),
+        ocr: str = Form(""),
+        user: User = Depends(require_user),
+    ):
+        csrf_check(request, user, csrf)
+        try:
+            folder = resolve_safe(path, allowed_roots(settings))
+        except BrowseError as exc:
+            raise HTTPException(403, str(exc)) from exc
+        if not folder.is_dir():
+            raise HTTPException(400, "not a folder")
+        bid = jobs.submit_batch(
+            "folder", folder, extract=_extract_for(settings, ocr), recursive=recursive == "yes"
+        )
+        store.audit("import.folder", f"{user.login}: {folder} -> batch {bid}")
+        return _back(request, "/", {"ok": True, "batch": bid})
+
+    @app.post("/import/file")
+    def import_file_route(
+        request: Request,
+        csrf: str = Form(""),
+        path: str = Form(""),
+        ocr: str = Form(""),
+        user: User = Depends(require_user),
+    ):
+        csrf_check(request, user, csrf)
+        try:
+            file = resolve_safe(path, allowed_roots(settings))
+        except BrowseError as exc:
+            raise HTTPException(403, str(exc)) from exc
+        if not file.is_file():
+            raise HTTPException(400, "not a file")
+        extract = _extract_for(settings, ocr)
+        if _sniff_kind(file) == "archive" and is_archive(file):
+            bid = jobs.submit_batch("archive", file, extract=extract)
+            return _back(request, "/", {"ok": True, "batch": bid})
+        try:
+            imp = import_path(
+                settings, store, jobs, file, source="folder", move=False, extract=extract
+            )
+        except ImportError_ as exc:
+            raise HTTPException(400, str(exc)) from exc
+        store.audit("import.file", f"{user.login}: {file} -> {imp.doc.id}")
+        return _back(request, f"/doc/{imp.doc.id}", {"ok": True, "id": imp.doc.id})
+
+    @app.get("/api/batches")
+    def api_batches(user: User = Depends(require_user)):
+        return {"batches": store.list_batches()}
+
+    @app.post("/batch/{bid}/cancel")
+    def cancel_batch(
+        request: Request, bid: str, csrf: str = Form(""), user: User = Depends(require_user)
+    ):
+        csrf_check(request, user, csrf)
+        if not store.get_batch(bid):
+            raise HTTPException(404)
+        return _back(request, "/", {"ok": jobs.cancel_batch(bid)})
+
+    @app.post("/export")
+    def export(
+        request: Request,
+        csrf: str = Form(""),
+        ids: list[str] = Form([]),
+        what: str = Form("all"),
+        user: User = Depends(require_user),
+    ):
+        """Download selected documents (outputs and/or originals) as one tar.gz."""
+        csrf_check(request, user, csrf)
+        ids = [i for i in ids if i][:500]
+        if not ids:
+            raise HTTPException(400, "select at least one document")
+        from ..pipeline import safe_stem
+
+        items: list[tuple[Path, str]] = []
+        for doc_id in ids:
+            doc = store.get(doc_id)
+            if not doc:
+                continue
+            folder = f"{safe_stem(doc.title)[:60]} ({doc.id[:6]})"
+            for key, rel in doc.outputs.items():
+                if what == "originals" and key != "original":
+                    continue
+                if what == "text" and key in ("original", "ocr_pdf"):
+                    continue
+                items.append((doc.dir / rel, f"{folder}/{_download_name(doc, key, doc.dir / rel)}"))
+        tmp_dir = settings.data_dir / "tmp"
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        out = tmp_dir / f"export-{int(time.time())}-{user.id}.tar.gz"
+        build_tar_gz(items, out)
+        store.audit("export", f"{user.login}: {len(ids)} document(s)")
+        from starlette.background import BackgroundTask
+
+        return FileResponse(
+            out,
+            media_type="application/gzip",
+            filename="funicular-export.tar.gz",
+            background=BackgroundTask(lambda: out.unlink(missing_ok=True)),
+        )
 
     @app.post("/doc/{doc_id}/reprocess")
     def reprocess(
@@ -578,6 +720,9 @@ def create_app(settings: Settings, *, validate: bool = True) -> FastAPI:
                         for d in store.list(limit=100)
                         if d.status in ("queued", "running")
                     ],
+                    "batches": [
+                        b for b in store.list_batches(20) if b["status"] in ("queued", "running")
+                    ],
                 }
                 yield _sse(snapshot)
                 while True:
@@ -620,6 +765,12 @@ def create_app(settings: Settings, *, validate: bool = True) -> FastAPI:
 # ------------------------------------------------------------------------------------------
 # helpers
 # ------------------------------------------------------------------------------------------
+def _sniff_kind(path: Path) -> str:
+    from ..sniff import sniff
+
+    return sniff(path).kind.value
+
+
 def _extract_for(settings: Settings, ocr: str) -> ExtractSettings:
     base = settings.extract
     if ocr in ("off", "auto", "force"):
