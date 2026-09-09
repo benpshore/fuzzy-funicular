@@ -34,6 +34,7 @@ def make_settings(tmp_path: Path, **over) -> Settings:
         allowed_github_ids=frozenset({ALLOWED_ID}),
         workers=1,
         embeddings="none",  # keep tests offline and fast; semantic search has its own test
+        scholar_auto=False,  # no network; the scholar test injects a mock transport
     )
     base.update(over)
     return Settings(**base)
@@ -719,3 +720,89 @@ def test_search_page_and_api_use_the_chunk_index(client, fixtures):
     )
     assert r.status_code == 200
     assert client.get("/api/search?q=riluzole").json()["hits"] == []
+
+
+def test_scholar_lookup_and_references(client, fixtures, monkeypatch):
+    import httpx
+
+    from funicular.scholar import clients as sc
+
+    DOI = "10.1038/nrdp.2017.71"  # noqa: N806
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        host, path = request.url.host, request.url.path
+        if host == "api.crossref.org" and path == "/works":
+            return httpx.Response(
+                200,
+                json={
+                    "message": {
+                        "items": [
+                            {
+                                "DOI": DOI,
+                                "title": [
+                                    "Riluzole Exposure and Survival in Motor Neuron Disease: A Registry Cohort"
+                                ],
+                                "container-title": ["Journal of Testing"],
+                                "issued": {"date-parts": [[2026]]},
+                                "author": [
+                                    {"family": "Shore", "given": "B."},
+                                    {"family": "Other", "given": "A. N."},
+                                ],
+                                "is-referenced-by-count": 3,
+                            }
+                        ]
+                    }
+                },
+            )
+        if host == "api.crossref.org":
+            return httpx.Response(404, json={})
+        if host == "api.scite.ai":
+            return httpx.Response(
+                200, json={"total": 3, "supporting": 1, "contradicting": 0, "mentioning": 2}
+            )
+        return httpx.Response(200, json={})
+
+    app = client.app
+    app.state.jobs.fetcher_factory = lambda: sc.Fetcher(transport=httpx.MockTransport(handler))
+    app.state.settings.scholar_auto = True
+    csrf = sign_in(client)
+    r = client.post(
+        "/upload",
+        files=[("files", ("scholarly.pdf", fixtures["scholarly"].read_bytes(), "application/pdf"))],
+        data={"csrf": csrf},
+        headers={"Accept": "application/json"},
+    )
+    doc_id = r.json()["created"][0]["id"]
+    wait_done(client, doc_id)
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        sj = client.get(f"/doc/{doc_id}/scholar").json()
+        if sj.get("resolution"):
+            break
+        time.sleep(0.2)
+    assert sj["resolution"]["verified"], sj
+    assert (
+        sj["resolution"]["work"]["doi"] == DOI
+        and sj["resolution"]["work"]["scite"]["supporting"] == 1
+    )
+    d = client.get(f"/api/docs/{doc_id}").json()
+    assert f"doi:{DOI}" in d["tags"] and "2026" in d["tags"]
+    r = client.get(f"/doc/{doc_id}")
+    assert "Verified" in r.text and "Journal of Testing" in r.text
+    r = client.post(
+        f"/doc/{doc_id}/scholar/adopt", data={"csrf": csrf}, headers={"Accept": "application/json"}
+    )
+    assert r.json()["title"].startswith("Shore and Other - 2026 - Riluzole Exposure")
+    r = client.post(
+        f"/doc/{doc_id}/scholar/refs",
+        data={"csrf": csrf, "resolve": "no"},
+        headers={"Accept": "application/json"},
+    )
+    rep = r.json()
+    assert rep["total"] >= 3 and any("Hardiman" in x["ref"]["raw"] for x in rep["refs"])
+    r = client.get(f"/doc/{doc_id}")
+    assert "References:" in r.text
+    r = client.post(
+        f"/doc/{doc_id}/scholar/verify", data={"csrf": csrf}, headers={"Accept": "application/json"}
+    )
+    assert r.status_code == 200 and r.json()["resolution"]["verified"]

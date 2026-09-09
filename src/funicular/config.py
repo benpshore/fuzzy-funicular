@@ -101,6 +101,8 @@ class Settings(BaseModel):
     icloud_evict_after: bool = False
     # Search: embeddings backend (auto | sentence-transformers | model2vec | none)
     embeddings: str = "auto"
+    # Look every PDF up online (Crossref & co.) after extraction; cached, rate limited.
+    scholar_auto: bool = True
     watch_inbox: bool = False
     # Behind Tailscale Serve / Caddy: trust X-Forwarded-Proto from the loopback proxy only.
     trust_proxy: bool = False
@@ -149,6 +151,7 @@ class Settings(BaseModel):
             icloud_wait_seconds=_env_int("ICLOUD_WAIT_SECONDS", 900),
             icloud_evict_after=_env_bool("ICLOUD_EVICT_AFTER", False),
             embeddings=_env("EMBEDDINGS", "auto") or "auto",
+            scholar_auto=_env_bool("SCHOLAR_AUTO", True),
             watch_inbox=_env_bool("WATCH_INBOX", False),
             trust_proxy=_env_bool("TRUST_PROXY", False),
         )

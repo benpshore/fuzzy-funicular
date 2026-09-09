@@ -371,6 +371,12 @@ def create_app(settings: Settings, *, validate: bool = True) -> FastAPI:
                 report = json.loads((doc.dir / doc.outputs["report"]).read_text())
             except OSError, ValueError:
                 report = {}
+        refs_report = None
+        if "references" in doc.outputs:
+            try:
+                refs_report = json.loads((doc.dir / doc.outputs["references"]).read_text())
+            except OSError, ValueError:
+                refs_report = None
         return render(
             request,
             "doc.html",
@@ -381,6 +387,8 @@ def create_app(settings: Settings, *, validate: bool = True) -> FastAPI:
             available=available,
             report=report,
             has_thumb=doc.kind in ("pdf", "image"),
+            scholar=_scholar_json(doc),
+            refs=refs_report,
         )
 
     # -------------------------------------------------------------- files
@@ -395,7 +403,7 @@ def create_app(settings: Settings, *, validate: bool = True) -> FastAPI:
         media = "text/plain; charset=utf-8"
         if key in ("original", "ocr_pdf", "compressed"):
             media = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
-        if key == "report":
+        if key in ("report", "scholar", "references"):
             media = "application/json"
         if key == "markdown":
             media = "text/markdown; charset=utf-8"
@@ -690,6 +698,98 @@ def create_app(settings: Settings, *, validate: bool = True) -> FastAPI:
         store.audit("delete", f"{user.login}: {doc_id} ({doc.title})")
         return _back(request, "/", {"ok": True})
 
+    # -------------------------------------------------------------- scholar
+    def _scholar_json(doc) -> dict | None:
+        p = doc.dir / "scholar.json"
+        try:
+            return json.loads(p.read_text()) if p.is_file() else None
+        except OSError, ValueError:
+            return None
+
+    @app.get("/doc/{doc_id}/scholar")
+    def scholar_get(doc_id: str, user: User = Depends(require_user)):
+        doc = store.get(doc_id)
+        if not doc:
+            raise HTTPException(404)
+        return _scholar_json(doc) or {"extracted": None, "resolution": None}
+
+    @app.post("/doc/{doc_id}/scholar/verify")
+    def scholar_verify(
+        request: Request, doc_id: str, csrf: str = Form(""), user: User = Depends(require_user)
+    ):
+        csrf_check(request, user, csrf)
+        doc = store.get(doc_id)
+        if not doc or doc.kind != "pdf":
+            raise HTTPException(404)
+        out = jobs.scholar_lookup(doc_id, online=True)
+        store.audit("scholar.verify", f"{user.login}: {doc_id}")
+        return _back(request, f"/doc/{doc_id}", out or {"error": "no PDF"})
+
+    @app.post("/doc/{doc_id}/scholar/refs")
+    def scholar_refs(
+        request: Request,
+        doc_id: str,
+        csrf: str = Form(""),
+        resolve: str = Form("yes"),
+        user: User = Depends(require_user),
+    ):
+        """Extract the reference list (lossless) and optionally resolve each entry online."""
+        csrf_check(request, user, csrf)
+        doc = store.get(doc_id)
+        if not doc:
+            raise HTTPException(404)
+        from ..scholar.refs import (
+            ReferenceReport,
+            ResolvedRef,
+            extract_references,
+            resolve_reference,
+        )
+
+        text = ""
+        for key in ("layout", "text"):
+            if key in doc.outputs:
+                text = _read_capped(doc.dir / doc.outputs[key], 5_000_000)
+                break
+        raw = extract_references(text)
+        if resolve == "yes":
+            f = jobs.fetcher_factory()
+            try:
+                rep = ReferenceReport([resolve_reference(r, f) for r in raw[:300]])
+            finally:
+                f.close()
+        else:
+            rep = ReferenceReport([ResolvedRef(r, None, 0.0, "not resolved") for r in raw])
+        (doc.dir / "references.json").write_text(
+            json.dumps(rep.to_dict(), ensure_ascii=False, indent=1)
+        )
+        outputs = dict(doc.outputs)
+        outputs["references"] = "references.json"
+        store.set_outputs(doc_id, outputs)
+        store.audit("scholar.refs", f"{user.login}: {doc_id} {rep.resolved}/{len(rep.refs)}")
+        return _back(request, f"/doc/{doc_id}", rep.to_dict())
+
+    @app.post("/doc/{doc_id}/scholar/adopt")
+    def scholar_adopt(
+        request: Request, doc_id: str, csrf: str = Form(""), user: User = Depends(require_user)
+    ):
+        """Use the verified record's title as the document title (Zotero-style naming)."""
+        csrf_check(request, user, csrf)
+        doc = store.get(doc_id)
+        if not doc:
+            raise HTTPException(404)
+        sj = _scholar_json(doc) or {}
+        work = (sj.get("resolution") or {}).get("work") or {}
+        if not work.get("title"):
+            raise HTTPException(400, "no verified record to adopt")
+        from ..scholar.model import Author, Work
+        from ..scholar.rename import build_name
+
+        w = Work(**{k: v for k, v in work.items() if k != "authors"})
+        w.authors = [Author(**a) for a in work.get("authors", [])]
+        title = build_name(w)
+        store.rename(doc_id, title)
+        return _back(request, f"/doc/{doc_id}", {"ok": True, "title": title})
+
     # -------------------------------------------------------------- preview / compress
     def _plan_reprocess(doc, ocr: str) -> dict:
         from ..estimate import audio_minutes, estimate, pdf_page_count
@@ -970,6 +1070,8 @@ def _download_name(doc, key: str, path: Path) -> str:
         "report": ".json",
         "ocr_pdf": ".ocr.pdf",
         "compressed": ".compressed.pdf",
+        "scholar": ".scholar.json",
+        "references": ".references.json",
     }.get(key, path.suffix)
     if key == "original":
         return doc.original_name
