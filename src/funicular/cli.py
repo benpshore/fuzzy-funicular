@@ -238,6 +238,51 @@ def estimate(
     console.print(f"total ≈ {total:.0f} s")
 
 
+models_app = typer.Typer(help="Pre-fetch and inspect ML models (docling, Whisper, embeddings).")
+app.add_typer(models_app, name="models")
+
+
+@models_app.command("status")
+def models_status(
+    asr_model: Annotated[str, typer.Option(help="ASR model to check")] = "whisper_turbo",
+) -> None:
+    """Which models are already on disk."""
+    from .models import status
+
+    table = Table(title="models")
+    table.add_column("model")
+    table.add_column("present")
+    table.add_column("location")
+    for m in status(asr_model).models:
+        table.add_row(m.name, "[green]yes" if m.present else "[yellow]no", m.path)
+    console.print(table)
+
+
+@models_app.command("fetch")
+def models_fetch(
+    asr_model: Annotated[
+        str, typer.Option(help="ASR model to fetch (none to skip)")
+    ] = "whisper_turbo",
+    no_docling: Annotated[bool, typer.Option(help="Skip docling layout/table models")] = False,
+    no_embeddings: Annotated[bool, typer.Option(help="Skip embedding models")] = False,
+) -> None:
+    """Download missing models now, so the first document does not wait (needs network once)."""
+    from .models import fetch
+
+    rep = fetch(
+        docling=not no_docling,
+        asr_model=None if asr_model.lower() in ("none", "") else asr_model,
+        embeddings=not no_embeddings,
+        progress=True,
+    )
+    for f in rep.fetched:
+        console.print(f"[green]✓[/] {f}")
+    for e in rep.errors:
+        err.print(f"[red]![/] {e}")
+    if rep.errors:
+        raise typer.Exit(code=1)
+
+
 @app.command()
 def serve(
     host: Annotated[

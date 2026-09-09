@@ -80,6 +80,21 @@ def run_checks() -> list[Check]:
             "uv sync --extra docling (torch MPS build from PyPI on Apple Silicon)",
         )
     )
+    try:
+        from .models import status as models_status
+
+        present = [m for m in models_status().models if m.present]
+        missing = [m.name for m in models_status().models if not m.present]
+        checks.append(
+            Check(
+                "models on disk",
+                not missing,
+                f"{len(present)} present" + (f"; missing: {', '.join(missing)}" if missing else ""),
+                "uv run funicular models fetch",
+            )
+        )
+    except Exception as exc:  # noqa: BLE001
+        checks.append(Check("models on disk", False, f"could not inspect: {exc}", ""))
     pv = poppler.version()
     checks.append(Check("poppler pdftotext", pv is not None, pv or "missing", poppler.BREW_HINT))
     for b in ("pdfinfo", "pdftoppm", "pdffonts"):

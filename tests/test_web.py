@@ -671,3 +671,18 @@ def test_compress_plan_page_and_run(client, fixtures):
     r = client.get(f"/doc/{doc_id}/file/compressed")
     assert r.status_code == 200 and r.content.startswith(b"%PDF")
     assert client.get("/doc/nope/plan").status_code == 404
+
+
+def test_auto_tags_are_generated(client, fixtures):
+    csrf = sign_in(client)
+    r = client.post(
+        "/upload",
+        files=[("files", ("s.pdf", fixtures["scholarly"].read_bytes(), "application/pdf"))],
+        data={"csrf": csrf},
+        headers={"Accept": "application/json"},
+    )
+    doc_id = r.json()["created"][0]["id"]
+    d = wait_done(client, doc_id)
+    tags = [t.lower() for t in d["tags"]]
+    assert "pdf" in tags and any("riluzole" in t for t in tags)
+    assert not d["needs_ocr"] and "scanned" not in tags
