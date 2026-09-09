@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block title %}Sign in · Funicular{% endblock %}
+{% block content %}
+<div class="card center stack">
+  <h1 class="h1">Funicular</h1>
+  <p>Private document library. Sign in with the GitHub account that has been allowed.</p>
+  <a class="btn btn-primary" href="/auth/login?start=1&next={{ next|urlencode }}">Sign in with GitHub</a>
+</div>
+{% endblock %}

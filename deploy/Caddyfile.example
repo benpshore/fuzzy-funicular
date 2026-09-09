@@ -1,0 +1,10 @@
+# Alternative to Tailscale Serve: Caddy terminates TLS on the Mac and forwards to loopback.
+# brew install caddy; caddy run --config deploy/Caddyfile.example
+# Then set FUNICULAR_PUBLIC_URL=https://funicular.example.net and FUNICULAR_TRUST_PROXY=1.
+funicular.example.net {
+    encode zstd gzip
+    reverse_proxy 127.0.0.1:8787 {
+        header_up X-Forwarded-Proto {scheme}
+        flush_interval -1   # keep the /events SSE stream unbuffered
+    }
+}

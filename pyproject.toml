@@ -1,0 +1,111 @@
+[project]
+name = "fuzzy-funicular"
+version = "0.1.0"
+description = "Layout-faithful text extraction for scholarly and difficult documents, with an Apple-native private web front end."
+readme = "README.md"
+license = "MIT"
+authors = [{ name = "Ben Shore" }]
+requires-python = ">=3.14,<3.15"
+dependencies = [
+    # PDF engines (all ship cp314 or abi3 wheels for macOS arm64 and Linux x86_64)
+    "pymupdf>=1.28.2",
+    "pymupdf4llm>=1.28.2",
+    "pypdfium2>=5.13.0",
+    "pillow>=12.3.0",
+    # CLI / config
+    "typer>=0.12.5,<0.27.0",   # upper bound matches docling-slim[standard]
+    "rich>=13.0.0",
+    "pydantic>=2.13.5",
+    "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+# Apple Vision OCR (only resolvable on macOS; the marker keeps Linux syncs clean).
+ocr = ["ocrmac>=1.0.1; sys_platform == 'darwin'"]
+# docling handles audio (ASR), DOCX/PPTX/XLSX, HTML web articles, and images.
+docling = [
+    "docling[asr,ocrmac]>=2.126.0",
+    # Declared directly so [tool.uv.sources] can route Linux to the CPU index
+    # (uv only applies sources to direct dependencies).
+    "torch>=2.14.0",
+    "torchvision>=0.29.0",
+]
+# Private web front end.
+web = [
+    "fastapi>=0.141.1",
+    "uvicorn[standard]>=0.52.4",
+    "jinja2>=3.1.6",
+    "python-multipart>=0.0.32",
+    "httpx>=0.28.1",
+    "watchfiles>=1.2.0",
+]
+all = ["fuzzy-funicular[ocr,docling,web]"]
+
+[project.scripts]
+funicular = "funicular.cli:app"
+
+[build-system]
+requires = ["uv_build>=0.12.7,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "funicular"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.0",
+    "ruff>=0.16.6",
+    "httpx>=0.28.1",
+]
+
+[tool.uv]
+# Freeze the interpreter policy: always the uv-managed CPython pinned in
+# .python-version (3.14), never a Homebrew/system/Xcode python.
+python-preference = "only-managed"
+required-version = ">=0.12.7"
+# Resolve only for the platforms we actually run on (Apple Silicon macOS and
+# Linux x86_64 for local validation). Keeps uv.lock small and forces a resolve
+# failure if a dependency loses its macOS arm64 wheel.
+environments = [
+    "sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "sys_platform == 'linux' and platform_machine == 'x86_64'",
+]
+required-environments = [
+    "sys_platform == 'darwin' and platform_machine == 'arm64'",
+]
+# docling/docling-core pin transformers<5.9; force the patched version for
+# GHSA-xrqw-3rrv-vx5w (CVE-2026-9856, path traversal in save_pretrained()).
+# Same override as doclinglibx; re-verify docling paths on each docling bump.
+override-dependencies = ["transformers>=5.10.0"]
+
+# On Linux pull CPU-only torch (no multi-GB CUDA wheels). On macOS the PyPI
+# wheel is the Metal (MPS) build, so it stays on the default index.
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
+torchvision = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "S", "W"]
+ignore = ["S101", "S603", "S607"]  # asserts in tests; subprocess use is deliberate and argv-based
+
+[tool.ruff.lint.flake8-bugbear]
+extend-immutable-calls = ["fastapi.Depends", "fastapi.File", "fastapi.Form"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q -ra"
+asyncio_mode = "auto"
