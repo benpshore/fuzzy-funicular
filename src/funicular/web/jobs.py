@@ -88,6 +88,7 @@ class JobManager:
         self.timings = Timings(settings.data_dir / "timings.json")
         self.index = SearchIndex(settings.data_dir / "search.sqlite3", embed=settings.embeddings)
         self.fetcher_factory = self._default_fetcher
+        self.provider_factory = self._default_provider
 
     # ------------------------------------------------------------------ lifecycle
     def start(self, loop: asyncio.AbstractEventLoop) -> None:
@@ -106,6 +107,129 @@ class JobManager:
             ctx.cancel(reason)
         self.guard.stop()
         self.pool.shutdown(wait=False, cancel_futures=True)
+
+    def _default_provider(self, name: str | None = None):
+        from ..llm import get_provider
+
+        return get_provider(name)
+
+    # ------------------------------------------------------------------ summaries / ask
+    def submit_summarize(self, doc_id: str, provider_name: str | None = None) -> bool:
+        key = f"summary:{doc_id}"
+        with self._lock:
+            if key in self._active:
+                return False
+            self._active[key] = JobContext(id=key)
+        self._publish(
+            {
+                "type": "progress",
+                "id": doc_id,
+                "status": "running",
+                "stage": "summarize",
+                "label": "Summarising",
+                "progress": 5,
+            }
+        )
+        self.pool.submit(self._run_summarize, doc_id, provider_name)
+        return True
+
+    def _run_summarize(self, doc_id: str, provider_name: str | None) -> None:
+        from ..llm import LLMUnavailable
+        from ..summarize import summarize
+
+        key = f"summary:{doc_id}"
+        with self._lock:
+            ctx = self._active.get(key)
+        doc = self.store.get(doc_id)
+        if ctx is None or doc is None:
+            with self._lock:
+                self._active.pop(key, None)
+            return
+        token = current_job.set(ctx)
+        try:
+            body = ""
+            for k in ("text", "markdown", "layout"):
+                if k in doc.outputs and (doc.dir / doc.outputs[k]).is_file():
+                    body = (doc.dir / doc.outputs[k]).read_text(encoding="utf-8", errors="replace")
+                    break
+            if not body.strip():
+                raise ValueError("no extracted text to summarise")
+            provider = self.provider_factory(provider_name)
+
+            def progress(stage, done, total):
+                ctx.check()
+                pct = 5 + 90 * (done / total if total else 1)
+                self._publish(
+                    {
+                        "type": "progress",
+                        "id": doc_id,
+                        "status": "running",
+                        "stage": stage,
+                        "label": f"Summarising ({done}/{total})",
+                        "progress": round(pct, 1),
+                    }
+                )
+
+            summary = summarize(body, provider, title=doc.title, progress=progress)
+            (doc.dir / "summary.json").write_text(
+                json.dumps(summary.to_dict(), ensure_ascii=False, indent=1)
+            )
+            outputs = dict(doc.outputs)
+            outputs["summary"] = "summary.json"
+            self.store.set_outputs(doc_id, outputs)
+            kws = [k for k in (summary.card.get("keywords") or []) if isinstance(k, str)][:6]
+            if kws:
+                self.store.add_tags(doc_id, [k[:40] for k in kws])
+            self.store.audit(
+                "summarize",
+                f"{doc_id}: {summary.provider}/{summary.model} "
+                f"{summary.input_tokens}+{summary.output_tokens} tok",
+            )
+            self._publish(
+                {
+                    "type": "done",
+                    "id": doc_id,
+                    "status": "done",
+                    "stage": "done",
+                    "label": "Done",
+                    "progress": 100,
+                    "needs_ocr": doc.needs_ocr,
+                    "warnings": doc.warnings,
+                    "summary": True,
+                }
+            )
+        except (Cancelled, LLMUnavailable, ValueError) as exc:
+            log.info("summary for %s not produced: %s", doc_id, exc)
+            self._publish(
+                {
+                    "type": "done",
+                    "id": doc_id,
+                    "status": "done",
+                    "stage": "done",
+                    "label": "Done",
+                    "progress": 100,
+                    "needs_ocr": doc.needs_ocr,
+                    "warnings": doc.warnings + [f"summary: {exc}"],
+                }
+            )
+        except Exception as exc:
+            log.exception("summary failed for %s", doc_id)
+            self._publish(
+                {
+                    "type": "done",
+                    "id": doc_id,
+                    "status": "done",
+                    "stage": "done",
+                    "label": "Done",
+                    "progress": 100,
+                    "needs_ocr": doc.needs_ocr,
+                    "warnings": doc.warnings + [f"summary failed: {exc}"],
+                }
+            )
+        finally:
+            current_job.reset(token)
+            with self._lock:
+                self._active.pop(key, None)
 
     def _default_fetcher(self):
         from ..scholar.clients import Cache, Fetcher

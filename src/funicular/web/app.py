@@ -389,6 +389,8 @@ def create_app(settings: Settings, *, validate: bool = True) -> FastAPI:
             has_thumb=doc.kind in ("pdf", "image"),
             scholar=_scholar_json(doc),
             refs=refs_report,
+            summary=_summary_json(doc),
+            providers=_providers(),
         )
 
     # -------------------------------------------------------------- files
@@ -403,7 +405,7 @@ def create_app(settings: Settings, *, validate: bool = True) -> FastAPI:
         media = "text/plain; charset=utf-8"
         if key in ("original", "ocr_pdf", "compressed"):
             media = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
-        if key in ("report", "scholar", "references"):
+        if key in ("report", "scholar", "references", "summary"):
             media = "application/json"
         if key == "markdown":
             media = "text/markdown; charset=utf-8"
@@ -697,6 +699,105 @@ def create_app(settings: Settings, *, validate: bool = True) -> FastAPI:
         shutil.rmtree(doc.dir, ignore_errors=True)
         store.audit("delete", f"{user.login}: {doc_id} ({doc.title})")
         return _back(request, "/", {"ok": True})
+
+    # -------------------------------------------------------------- summaries / ask
+    def _summary_json(doc) -> dict | None:
+        p = doc.dir / "summary.json"
+        try:
+            return json.loads(p.read_text()) if p.is_file() else None
+        except OSError, ValueError:
+            return None
+
+    @app.post("/doc/{doc_id}/summarize")
+    def summarize_route(
+        request: Request,
+        doc_id: str,
+        csrf: str = Form(""),
+        provider: str = Form("auto"),
+        user: User = Depends(require_user),
+    ):
+        csrf_check(request, user, csrf)
+        doc = store.get(doc_id)
+        if not doc:
+            raise HTTPException(404)
+        if doc.status != "done":
+            raise HTTPException(409, "document is still processing")
+        if not jobs.submit_summarize(doc_id, None if provider == "auto" else provider):
+            raise HTTPException(409, "a summary is already being written")
+        store.audit("summarize.start", f"{user.login}: {doc_id} via {provider}")
+        return _back(request, f"/doc/{doc_id}", {"ok": True})
+
+    @app.get("/doc/{doc_id}/summary")
+    def summary_get(doc_id: str, user: User = Depends(require_user)):
+        doc = store.get(doc_id)
+        if not doc:
+            raise HTTPException(404)
+        return _summary_json(doc) or {"card": None}
+
+    def _passages(question: str, doc_ids: list[str] | None, limit: int = 12) -> list[dict]:
+        hits, _info = jobs.index.search(question, limit=limit, doc_ids=doc_ids)
+        out = []
+        with jobs.index._conn() as c:  # noqa: SLF001 - read the chunk text for the answer
+            for h in hits:
+                row = c.execute(
+                    "SELECT text FROM chunks WHERE doc_id=? AND idx=?", (h.doc_id, h.idx)
+                ).fetchone()
+                if row:
+                    out.append(
+                        {"doc_id": h.doc_id, "title": h.title, "page": h.page, "text": row["text"]}
+                    )
+        return out
+
+    @app.post("/ask")
+    def ask_route(
+        request: Request,
+        csrf: str = Form(""),
+        question: str = Form(""),
+        provider: str = Form("auto"),
+        doc_id: str = Form(""),
+        user: User = Depends(require_user),
+    ):
+        """Grounded answer over the library (or one document) with passage citations."""
+        csrf_check(request, user, csrf)
+        from ..llm import LLMUnavailable
+        from ..summarize import ask
+
+        q = question.strip()[:2000]
+        if not q:
+            raise HTTPException(400, "question required")
+        try:
+            prov = jobs.provider_factory(None if provider == "auto" else provider)
+            answer = ask(q, _passages(q, [doc_id] if doc_id else None), prov)
+        except LLMUnavailable as exc:
+            raise HTTPException(503, str(exc)) from exc
+        store.audit("ask", f"{user.login}: {prov.name} doc={doc_id or '*'} q={q[:80]}")
+        payload = {"question": q, "doc_id": doc_id} | answer.to_dict()
+        if "application/json" in request.headers.get("accept", ""):
+            return JSONResponse(payload)
+        return render(
+            request,
+            "ask.html",
+            user,
+            answer=payload,
+            providers=_providers(),
+            doc=store.get(doc_id) if doc_id else None,
+        )
+
+    @app.get("/ask", response_class=HTMLResponse)
+    def ask_page(request: Request, doc_id: str = "", user: User = Depends(require_user)):
+        return render(
+            request,
+            "ask.html",
+            user,
+            answer=None,
+            providers=_providers(),
+            doc=store.get(doc_id) if doc_id else None,
+        )
+
+    def _providers() -> list[dict]:
+        from ..llm import describe_providers
+
+        return describe_providers()
 
     # -------------------------------------------------------------- scholar
     def _scholar_json(doc) -> dict | None:
@@ -1072,6 +1173,7 @@ def _download_name(doc, key: str, path: Path) -> str:
         "compressed": ".compressed.pdf",
         "scholar": ".scholar.json",
         "references": ".references.json",
+        "summary": ".summary.json",
     }.get(key, path.suffix)
     if key == "original":
         return doc.original_name

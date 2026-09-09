@@ -1,0 +1,7 @@
+{% extends "base.html" %}
+{% block title %}Ask · Funicular{% endblock %}
+{% block content %}
+<h1 class="h1">Ask</h1>
+{% if doc %}<p class="muted"><a class="back" href="/doc/{{ doc.id }}">‹ {{ doc.title }}</a></p>{% endif %}
+{% include "_ask_form.html" %}
+{% endblock %}
