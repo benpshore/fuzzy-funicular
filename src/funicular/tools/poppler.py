@@ -11,6 +11,7 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ..resources import run as _run_limited
 from .binaries import MissingBinaryError, find_binary
 
 BREW_HINT = "Install with: brew install poppler   (Linux: apt-get install poppler-utils)"
@@ -39,7 +40,7 @@ def version() -> str | None:
 
 
 def _run(argv: list[str], timeout: int) -> subprocess.CompletedProcess[bytes]:
-    return subprocess.run(argv, capture_output=True, timeout=timeout, check=False)
+    return _run_limited(argv, timeout=timeout)
 
 
 def pdftotext_layout(

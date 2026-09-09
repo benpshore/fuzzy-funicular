@@ -17,6 +17,11 @@ dependencies = [
     "rich>=13.0.0",
     "pydantic>=2.13.5",
     "python-dotenv>=1.0",
+    # resources, search normalisation, numerics
+    "psutil>=7.2.2",
+    "numpy>=2.0",
+    "jellyfish>=1.2.1",
+    "rapidfuzz>=3.14.6",
 ]
 
 [project.optional-dependencies]
@@ -25,6 +30,7 @@ ocr = ["ocrmac>=1.0.1; sys_platform == 'darwin'"]
 # docling handles audio (ASR), DOCX/PPTX/XLSX, HTML web articles, and images.
 docling = [
     "docling[asr,ocrmac]>=2.126.0",
+    "sentence-transformers>=6.0.1",
     # Declared directly so [tool.uv.sources] can route Linux to the CPU index
     # (uv only applies sources to direct dependencies).
     "torch>=2.14.0",
@@ -39,7 +45,14 @@ web = [
     "httpx>=0.28.1",
     "watchfiles>=1.2.0",
 ]
-all = ["fuzzy-funicular[ocr,docling,web]"]
+# Semantic search without torch: static embeddings (model2vec). The docling extra adds
+# sentence-transformers on MPS/CUDA for higher quality.
+search = ["model2vec>=0.9.0"]
+# Scholarly feeds and metadata (Crossref/OpenAlex/... use httpx from the web extra).
+scholar = ["feedparser>=6.0.14", "httpx>=0.28.1"]
+# MCP server for Claude Desktop / ChatGPT desktop.
+mcp = ["mcp>=2.2.0"]
+all = ["fuzzy-funicular[ocr,docling,web,search,scholar,mcp]"]
 
 [project.scripts]
 funicular = "funicular.cli:app"

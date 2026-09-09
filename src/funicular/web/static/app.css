@@ -185,3 +185,9 @@ fieldset.row { border: 0; padding: 0; margin: 0; display: flex; flex-wrap: wrap;
   .topbar-inner { gap: 8px; padding: 8px 12px; }
   .searchbar { flex-direction: column; align-items: stretch; }
 }
+
+/* key/value lists (system page) */
+.kv { display: grid; grid-template-columns: max-content 1fr; gap: 8px 16px; margin: 0; }
+.kv dt { color: var(--muted); }
+.kv dd { margin: 0; overflow-wrap: anywhere; }
+.cancel-form { margin-top: 12px; }

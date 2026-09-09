@@ -67,6 +67,19 @@ def run_checks() -> list[Check]:
             )
         )
 
+    from .resources import gpu_info
+
+    g = gpu_info()
+    accel = f"{g['chip'] or g['machine']}: torch {g['torch'] or '-'} on {g['torch_device']}"
+    accel += ", MLX" if g["mlx"] else ""
+    checks.append(
+        Check(
+            "acceleration",
+            (not g["apple_silicon"]) or g["torch_device"] == "mps" or g["torch"] is None,
+            accel,
+            "uv sync --extra docling (torch MPS build from PyPI on Apple Silicon)",
+        )
+    )
     pv = poppler.version()
     checks.append(Check("poppler pdftotext", pv is not None, pv or "missing", poppler.BREW_HINT))
     for b in ("pdfinfo", "pdftoppm", "pdffonts"):

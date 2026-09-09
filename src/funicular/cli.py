@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sys
 from pathlib import Path
 from typing import Annotated
@@ -194,16 +195,52 @@ def serve(
     if watch:
         settings = settings.model_copy(update={"watch_inbox": True})
     application = create_app(settings)
-    uvicorn.run(
-        application,
-        host=settings.host,
-        port=settings.port,
-        log_level="info",
-        proxy_headers=settings.trust_proxy,
-        forwarded_allow_ips="127.0.0.1" if settings.trust_proxy else None,
-        server_header=False,
-        date_header=False,
-    )
+    settings.data_dir.mkdir(parents=True, exist_ok=True)
+    settings.pid_file.write_text(str(os.getpid()))
+    try:
+        uvicorn.run(
+            application,
+            host=settings.host,
+            port=settings.port,
+            log_level="info",
+            proxy_headers=settings.trust_proxy,
+            forwarded_allow_ips="127.0.0.1" if settings.trust_proxy else None,
+            server_header=False,
+            date_header=False,
+        )
+    finally:
+        settings.pid_file.unlink(missing_ok=True)
+
+
+@app.command()
+def stop(
+    force: Annotated[bool, typer.Option(help="SIGKILL instead of a clean SIGTERM")] = False,
+) -> None:
+    """Stop a running `funicular serve` cleanly (jobs cancelled, helper processes killed)."""
+    import signal
+
+    settings = Settings.from_env()
+    pid_file = settings.pid_file
+    if not pid_file.exists():
+        err.print(f"[yellow]no pid file at {pid_file}; is the server running?")
+        raise typer.Exit(code=1)
+    try:
+        pid = int(pid_file.read_text().strip())
+    except ValueError as exc:
+        err.print("[red]pid file is unreadable")
+        raise typer.Exit(code=1) from exc
+    from .resources import kill_tree
+
+    if force:
+        n = kill_tree(pid, grace=0.5)
+        console.print(f"killed {n} process(es)")
+    else:
+        try:
+            os.kill(pid, signal.SIGTERM)
+            console.print(f"sent SIGTERM to {pid}")
+        except ProcessLookupError:
+            err.print("[yellow]process already gone")
+    pid_file.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -19,6 +19,7 @@ from typing import Any
 from PIL import Image
 
 from ..config import ExtractSettings
+from ..resources import run as _run_limited
 from ..tools.binaries import find_binary
 from .layout import Positioned, layout_text
 
@@ -200,9 +201,7 @@ class MacOcrCliBackend(Backend):
         with tempfile.TemporaryDirectory(prefix="funicular-ocr-") as td:
             p = Path(td) / "page.png"
             image.convert("RGB").save(p, format="PNG")
-            proc = subprocess.run(
-                [self.binary, str(p)], capture_output=True, timeout=600, check=False
-            )
+            proc = _run_limited([self.binary, str(p)], timeout=600)
         if proc.returncode != 0:
             raise OcrUnavailableError(
                 f"{self.binary} exited {proc.returncode}: "
@@ -274,7 +273,7 @@ class TesseractBackend(Backend):
                 "preserve_interword_spaces=1",
                 "tsv",
             ]
-            proc = subprocess.run(argv, capture_output=True, timeout=600, check=False)
+            proc = _run_limited(argv, timeout=600)
         if proc.returncode != 0:
             err = proc.stderr.decode("utf-8", "replace")
             if "Failed loading language" in err:

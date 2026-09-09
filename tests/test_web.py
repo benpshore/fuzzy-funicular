@@ -484,3 +484,36 @@ def test_inbox_watcher_imports_stable_files(tmp_path, github, fixtures):
         docs = c.get("/api/docs").json()["docs"]
         assert len(docs) == 1 and docs[0]["original_name"] == "dropped.pdf"
         wait_done(c, docs[0]["id"])
+
+
+def test_system_page_cancel_and_shutdown(client, fixtures, monkeypatch):
+    csrf = sign_in(client)
+    r = client.get("/api/system")
+    assert r.status_code == 200 and r.json()["mem_total_gb"] > 0
+    r = client.get("/system")
+    assert r.status_code == 200 and "Stop the server" in r.text
+    # cancel on an idle document is a no-op
+    r = client.post(
+        "/upload",
+        files=[("files", ("s.pdf", fixtures["scholarly"].read_bytes(), "application/pdf"))],
+        data={"csrf": csrf},
+        headers={"Accept": "application/json"},
+    )
+    doc_id = r.json()["created"][0]["id"]
+    r = client.post(
+        f"/doc/{doc_id}/cancel", data={"csrf": csrf}, headers={"Accept": "application/json"}
+    )
+    assert r.status_code == 200 and r.json()["ok"] in (True, False)
+    wait_done(client, doc_id)
+    # shutdown must not actually kill the test process: stub the signal
+    import os
+
+    sent = {}
+    monkeypatch.setattr(os, "kill", lambda pid, sig: sent.setdefault("sig", sig))
+    r = client.post(
+        "/api/system/shutdown", data={"csrf": csrf}, headers={"Accept": "application/json"}
+    )
+    assert r.status_code == 200 and r.json()["stopping"] is True
+    time.sleep(1)
+    assert sent.get("sig") is not None
+    assert client.app.state.jobs.stopping is True

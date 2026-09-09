@@ -507,6 +507,46 @@ def create_app(settings: Settings, *, validate: bool = True) -> FastAPI:
         store.audit("delete", f"{user.login}: {doc_id} ({doc.title})")
         return _back(request, "/", {"ok": True})
 
+    # -------------------------------------------------------------- system
+    @app.get("/api/system")
+    def api_system(user: User = Depends(require_user)):
+        return jobs.system()
+
+    @app.get("/system", response_class=HTMLResponse)
+    def system_page(request: Request, user: User = Depends(require_user)):
+        return render(request, "system.html", user, system=jobs.system())
+
+    @app.post("/doc/{doc_id}/cancel")
+    def cancel_job(
+        request: Request, doc_id: str, csrf: str = Form(""), user: User = Depends(require_user)
+    ):
+        csrf_check(request, user, csrf)
+        if not store.get(doc_id):
+            raise HTTPException(404)
+        ok = jobs.cancel(doc_id)
+        store.audit("cancel", f"{user.login}: {doc_id} ({'running' if ok else 'idle'})")
+        return _back(request, f"/doc/{doc_id}", {"ok": ok})
+
+    @app.post("/api/system/shutdown")
+    def shutdown(request: Request, csrf: str = Form(""), user: User = Depends(require_user)):
+        """Clean exit: cancel jobs, kill their process trees, stop the server."""
+        csrf_check(request, user, csrf)
+        store.audit("shutdown", user.login)
+        jobs.stop("server stopped from the web app")
+
+        def _exit() -> None:
+            import os
+            import signal
+            import time as _t
+
+            _t.sleep(0.5)
+            os.kill(os.getpid(), signal.SIGTERM)
+
+        import threading
+
+        threading.Thread(target=_exit, daemon=True).start()
+        return _back(request, "/auth/login", {"ok": True, "stopping": True})
+
     # -------------------------------------------------------------- JSON + SSE
     @app.get("/api/docs")
     def api_docs(user: User = Depends(require_user)):
