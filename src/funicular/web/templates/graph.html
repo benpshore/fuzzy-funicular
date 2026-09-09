@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}Graph · Funicular{% endblock %}
+{% block content %}
+<h1 class="h1">Literature graph</h1>
+<p class="muted">Citation neighbourhood of your verified papers (Semantic Scholar, Crossref; OpenAlex with a key), plus dashed edges for similar titles. Filled nodes are in the library. {{ seeds }} document{{ 's' if seeds != 1 }} can seed it.</p>
+<form class="card stack" method="post" action="/graph/build">
+  <input type="hidden" name="csrf" value="{{ user.csrf }}">
+  <label class="label" for="max_nodes">Nodes</label>
+  <input class="input select" id="max_nodes" name="max_nodes" type="number" min="5" max="120" value="40">
+  <button class="btn btn-primary" type="submit">Build graph</button>
+  <p class="muted small">Takes 10–60 s for 40 nodes (rate limits on the citation services). Layout runs on {{ graph.device if graph else 'the GPU when available' }}.</p>
+</form>
+{% if graph and graph.nodes %}
+<section class="card" aria-labelledby="g-h">
+  <h2 id="g-h" class="h2">{{ graph.nodes|length }} papers · {{ graph.edges|length }} links · built in {{ graph.seconds }} s</h2>
+  <div class="graph-tools" role="group" aria-label="View controls">
+    <button class="btn btn-secondary" type="button" data-g="zoom-in" aria-label="Zoom in">+</button>
+    <button class="btn btn-secondary" type="button" data-g="zoom-out" aria-label="Zoom out">−</button>
+    <button class="btn btn-secondary" type="button" data-g="left" aria-label="Pan left">←</button>
+    <button class="btn btn-secondary" type="button" data-g="right" aria-label="Pan right">→</button>
+    <button class="btn btn-secondary" type="button" data-g="up" aria-label="Pan up">↑</button>
+    <button class="btn btn-secondary" type="button" data-g="down" aria-label="Pan down">↓</button>
+    <button class="btn btn-secondary" type="button" data-g="reset">Reset</button>
+  </div>
+  <canvas id="graph-canvas" width="1000" height="700" role="img" aria-label="Citation graph; use the list below for the same information" tabindex="0"></canvas>
+  <p id="graph-detail" class="muted" aria-live="polite">Tap a node, or use the list below.</p>
+  <details class="notes"><summary>All papers as a list</summary>
+    <ol class="refs">
+      {% for n in graph.nodes|sort(attribute='degree', reverse=true) %}
+      <li>{% if n.in_library %}<strong>{% endif %}{% if n.doc_id %}<a href="/doc/{{ n.doc_id }}">{{ n.title }}</a>{% elif n.doi %}<a href="https://doi.org/{{ n.doi }}" rel="noreferrer">{{ n.title }}</a>{% else %}{{ n.title }}{% endif %}{% if n.in_library %}</strong>{% endif %} <span class="muted small">{{ n.year or '' }} · {{ n.degree }} links{% if n.cited_by is not none %} · cited by {{ n.cited_by }}{% endif %}</span></li>
+      {% endfor %}
+    </ol>
+  </details>
+  {% if graph.notes %}<details class="notes"><summary>Notes</summary><ul>{% for x in graph.notes %}<li>{{ x }}</li>{% endfor %}</ul></details>{% endif %}
+  <script src="/static/graph.js"></script>
+</section>
+{% elif graph %}
+<p class="card empty">The last build produced no nodes.</p>
+{% endif %}
+{% endblock %}
