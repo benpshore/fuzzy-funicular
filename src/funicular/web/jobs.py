@@ -85,10 +85,16 @@ class JobManager:
             min_free_mb=settings.min_free_mb,
         )
         self.stopping = False
+        self._pending_summaries: set[str] = set()
         self.timings = Timings(settings.data_dir / "timings.json")
         self.index = SearchIndex(settings.data_dir / "search.sqlite3", embed=settings.embeddings)
         self.fetcher_factory = self._default_fetcher
         self.provider_factory = self._default_provider
+        from ..feeds import FeedStore
+
+        self.feeds = FeedStore(settings.data_dir / "feeds.sqlite3")
+        self.zotero_factory = self._default_zotero
+        self.feed_transport = None  # tests inject an httpx transport for PDF downloads
 
     # ------------------------------------------------------------------ lifecycle
     def start(self, loop: asyncio.AbstractEventLoop) -> None:
@@ -227,6 +233,218 @@ class JobManager:
                 }
             )
         finally:
+            current_job.reset(token)
+            with self._lock:
+                self._active.pop(key, None)
+
+    def _default_zotero(self):
+        from ..zotero import ZoteroLocal
+
+        return ZoteroLocal()
+
+    # ------------------------------------------------------------------ feeds
+    def stage_entry(self, entry_id: int, *, summarize: bool | None = None) -> dict:
+        """Find an open-access PDF for a feed entry, import it, and queue a summary."""
+        from ..feeds import Poller
+        from .importer import ImportError_, import_path
+
+        entry = self.feeds.entry(entry_id)
+        if not entry:
+            raise KeyError(entry_id)
+        if entry["status"] in ("imported", "staged") and entry.get("doc_id"):
+            return {"status": entry["status"], "doc_id": entry["doc_id"]}
+        fetcher = self.fetcher_factory()
+        poller = Poller(self.feeds, fetcher, transport=self.feed_transport)
+        try:
+            url = poller.find_pdf_url(entry)
+            if not url:
+                self.feeds.set_status(entry_id, "skipped", note="no open-access PDF found")
+                return {"status": "skipped", "note": "no open-access PDF found"}
+            tmp_dir = self.settings.data_dir / "tmp"
+            tmp_dir.mkdir(parents=True, exist_ok=True)
+            dest = tmp_dir / f"feed-{entry_id}.pdf"
+            try:
+                poller.download_pdf(url, dest)
+            except Exception as exc:  # noqa: BLE001
+                self.feeds.set_status(entry_id, "failed", note=f"download: {exc}")
+                return {"status": "failed", "note": str(exc)[:200]}
+            tags = ["feed:" + (self.feeds.get(entry["feed_id"]) or {}).get("name", "feed")[:40]]
+            if entry.get("doi"):
+                tags.append("doi:" + entry["doi"])
+            try:
+                imp = import_path(
+                    self.settings,
+                    self.store,
+                    self,
+                    dest,
+                    source="feed",
+                    move=True,
+                    tags=tags,
+                    skip_duplicates=True,
+                    filename=_entry_filename(entry),
+                )
+            except ImportError_ as exc:
+                self.feeds.set_status(entry_id, "failed", note=str(exc))
+                return {"status": "failed", "note": str(exc)[:200]}
+            self.feeds.set_status(entry_id, "staged", doc_id=imp.doc.id, note=url[:200])
+            want_summary = self.settings.feeds_autosummarize if summarize is None else summarize
+            if want_summary:
+                self._pending_summaries.add(imp.doc.id)
+            return {"status": "staged", "doc_id": imp.doc.id, "url": url}
+        finally:
+            poller.close()
+            fetcher.close()
+
+    def poll_feeds(self, feed_id: int | None = None) -> dict[int, int]:
+        from ..feeds import Poller
+
+        fetcher = self.fetcher_factory()
+        poller = Poller(self.feeds, fetcher, transport=self.feed_transport)
+        try:
+            if feed_id is not None:
+                counts = {feed_id: poller.poll(feed_id)}
+            else:
+                counts = poller.poll_all()
+        finally:
+            poller.close()
+            fetcher.close()
+        for fid, _n in counts.items():
+            feed = self.feeds.get(fid)
+            if feed and feed.get("auto_stage"):
+                for e in self.feeds.entries(fid, status="new", limit=50):
+                    self.pool.submit(self._safe_stage, e["id"])
+        return counts
+
+    def _safe_stage(self, entry_id: int) -> None:
+        try:
+            self.stage_entry(entry_id)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("staging entry %s failed: %s", entry_id, exc)
+
+    # ------------------------------------------------------------------ zotero
+    def import_zotero(
+        self, collection: str | None, *, extract: ExtractSettings | None = None
+    ) -> str:
+        """Batch job: copy every PDF attachment in a Zotero collection into the library."""
+        bid = self.store.create_batch("zotero", collection or "My Library")
+        key = f"batch:{bid}"
+        with self._lock:
+            self._active[key] = JobContext(id=key)
+        self.pool.submit(self._run_zotero, bid, collection, extract or self.settings.extract)
+        return bid
+
+    def _run_zotero(self, bid: str, collection: str | None, extract) -> None:
+        from .importer import ImportError_, import_path
+
+        key = f"batch:{bid}"
+        with self._lock:
+            ctx = self._active.get(key)
+        if ctx is None:
+            return
+        token = current_job.set(ctx)
+        z = self.zotero_factory()
+        imported = skipped = 0
+        errors: list[str] = []
+        try:
+            self.store.update_batch(bid, status="running")
+            items = z.items(collection)
+            total = sum(1 for it in items if it.attachments)
+            self.store.update_batch(bid, total=total)
+            done = 0
+            tmp_dir = self.settings.data_dir / "tmp"
+            tmp_dir.mkdir(parents=True, exist_ok=True)
+            for it in items:
+                ctx.check()
+                if not it.attachments:
+                    continue
+                att = it.attachments[0]
+                dest = tmp_dir / f"zotero-{att['key']}.pdf"
+                got = z.fetch_attachment(att["key"], att.get("filename", ""), dest)
+                done += 1
+                if not got:
+                    skipped += 1
+                    errors.append(f"{it.title[:60]}: attachment not available locally")
+                    continue
+                tags = ["zotero"] + [f"zotero:{c}" for c in it.collections[:3]] + it.tags[:5]
+                if it.doi:
+                    tags.append("doi:" + it.doi)
+                try:
+                    imp = import_path(
+                        self.settings,
+                        self.store,
+                        self,
+                        dest,
+                        source="zotero",
+                        move=True,
+                        extract=extract,
+                        tags=tags,
+                        skip_duplicates=True,
+                        filename=(att.get("filename") or f"{it.title[:80]}.pdf"),
+                    )
+                    if imp.duplicate_of is not None and imp.doc.id == imp.duplicate_of.id:
+                        skipped += 1
+                    else:
+                        imported += 1
+                        (imp.doc.dir / "zotero.json").write_text(
+                            json.dumps(it.to_dict(), ensure_ascii=False)
+                        )
+                        if imp.doc.title == imp.doc.original_name and it.title:
+                            self.store.rename(imp.doc.id, it.title[:200])
+                except ImportError_ as exc:
+                    errors.append(f"{it.title[:60]}: {exc}")
+                self.store.update_batch(bid, done=done, imported=imported, skipped=skipped)
+                self._publish(
+                    {
+                        "type": "batch",
+                        "id": bid,
+                        "kind": "zotero",
+                        "status": "running",
+                        "source": collection or "My Library",
+                        "done": done,
+                        "total": total,
+                        "imported": imported,
+                        "skipped": skipped,
+                    }
+                )
+            self.store.update_batch(
+                bid,
+                status="done",
+                done=done,
+                imported=imported,
+                skipped=skipped,
+                errors=errors[:50],
+            )
+            self._publish(
+                {
+                    "type": "batch",
+                    "id": bid,
+                    "kind": "zotero",
+                    "status": "done",
+                    "source": collection or "My Library",
+                    "done": done,
+                    "total": total,
+                    "imported": imported,
+                    "skipped": skipped,
+                    "errors": len(errors),
+                }
+            )
+        except Cancelled as exc:
+            self.store.update_batch(bid, status="failed", errors=[f"cancelled: {exc}"])
+        except Exception as exc:
+            log.exception("zotero import failed")
+            self.store.update_batch(bid, status="failed", errors=[str(exc)[:300]])
+            self._publish(
+                {
+                    "type": "batch",
+                    "id": bid,
+                    "kind": "zotero",
+                    "status": "failed",
+                    "source": collection or "My Library",
+                    "error": str(exc)[:200],
+                }
+            )
+        finally:
+            z.close()
             current_job.reset(token)
             with self._lock:
                 self._active.pop(key, None)
@@ -734,6 +952,9 @@ class JobManager:
                 log.info("indexing of %s skipped: cancelled", doc_id)
             except Exception as exc:  # search is additive; never fail the document for it
                 log.warning("indexing failed for %s: %s", doc_id, exc)
+            if doc_id in self._pending_summaries:
+                self._pending_summaries.discard(doc_id)
+                self.submit_summarize(doc_id)
             if doc.kind == "pdf":
                 try:
                     progress("scholar", 0, 1)
@@ -802,6 +1023,13 @@ class JobManager:
         finally:
             with self._lock:
                 self._active.pop(doc_id, None)
+
+
+def _entry_filename(entry: dict) -> str:
+    from ..pipeline import safe_stem
+
+    base = safe_stem(entry.get("title") or entry.get("doi") or "article")[:100]
+    return base + ".pdf"
 
 
 def _timing_key(stage: str, extract: ExtractSettings) -> str:

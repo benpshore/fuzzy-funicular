@@ -103,6 +103,10 @@ class Settings(BaseModel):
     embeddings: str = "auto"
     # Look every PDF up online (Crossref & co.) after extraction; cached, rate limited.
     scholar_auto: bool = True
+    # Feeds: summarise staged articles automatically (needs an LLM provider); poll interval in
+    # minutes while the server runs (0 = manual only).
+    feeds_autosummarize: bool = False
+    feeds_poll_minutes: int = 0
     watch_inbox: bool = False
     # Behind Tailscale Serve / Caddy: trust X-Forwarded-Proto from the loopback proxy only.
     trust_proxy: bool = False
@@ -152,6 +156,8 @@ class Settings(BaseModel):
             icloud_evict_after=_env_bool("ICLOUD_EVICT_AFTER", False),
             embeddings=_env("EMBEDDINGS", "auto") or "auto",
             scholar_auto=_env_bool("SCHOLAR_AUTO", True),
+            feeds_autosummarize=_env_bool("FEEDS_AUTOSUMMARIZE", False),
+            feeds_poll_minutes=_env_int("FEEDS_POLL_MINUTES", 0),
             watch_inbox=_env_bool("WATCH_INBOX", False),
             trust_proxy=_env_bool("TRUST_PROXY", False),
         )
