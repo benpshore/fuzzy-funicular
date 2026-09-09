@@ -29,6 +29,39 @@
   {% endif %}
 </div>
 
+{% if doc.kind == 'pdf' %}
+<section class="card" aria-labelledby="sch-h">
+  <h2 id="sch-h" class="h2">Scholarly record</h2>
+  {% set w = scholar.resolution.work if scholar and scholar.resolution else None %}
+  {% if w %}
+  <p><strong>{{ w.title }}</strong><br>
+    <span class="muted">{% for a in w.authors[:6] %}{{ a.family }}{% if a.given %} {{ a.given[:1] }}{% endif %}{% if not loop.last %}, {% endif %}{% endfor %}{% if w.authors|length > 6 %} et al.{% endif %}{% if w.journal %} · {{ w.journal }}{% endif %}{% if w.year %} · {{ w.year }}{% endif %}</span></p>
+  <dl class="kv">
+    {% if w.doi %}<dt>DOI</dt><dd><a href="https://doi.org/{{ w.doi }}" rel="noreferrer">{{ w.doi }}</a></dd>{% endif %}
+    {% if w.pmid %}<dt>PubMed</dt><dd><a href="https://pubmed.ncbi.nlm.nih.gov/{{ w.pmid }}/" rel="noreferrer">{{ w.pmid }}</a></dd>{% endif %}
+    {% if w.cited_by is not none %}<dt>Cited by</dt><dd>{{ w.cited_by }}{% if w.scite %} · Scite: {{ w.scite.supporting }} supporting, {{ w.scite.contradicting }} contradicting, {{ w.scite.mentioning }} mentioning{% endif %}</dd>{% endif %}
+    {% if w.oa_url %}<dt>Open access</dt><dd><a href="{{ w.oa_url }}" rel="noreferrer">PDF</a></dd>{% endif %}
+    <dt>Status</dt><dd>{% if scholar.resolution.verified %}<span class="badge badge-ok">Verified</span>{% else %}<span class="badge badge-warn">Unverified guess</span>{% endif %} ({{ (100 * scholar.resolution.confidence)|round|int }}%) · {{ w.sources|join(', ') }}</dd>
+  </dl>
+  <details class="notes"><summary>Evidence</summary><ul>{% for e in scholar.resolution.evidence %}<li>{{ e }}</li>{% endfor %}</ul></details>
+  {% elif scholar %}
+  <p class="muted">No verified record{% if scholar.get('extracted') and scholar.extracted.ids.doi %} (DOI {{ scholar.extracted.ids.doi }} found in the PDF){% endif %}.{% if scholar.get('error') %} {{ scholar.get('error') }}{% endif %}</p>
+  {% else %}
+  <p class="muted">Not checked yet.</p>
+  {% endif %}
+  <div class="chips">
+    <form method="post" action="/doc/{{ doc.id }}/scholar/verify"><input type="hidden" name="csrf" value="{{ user.csrf }}"><button class="btn btn-secondary" type="submit">Verify online</button></form>
+    {% if w %}<form method="post" action="/doc/{{ doc.id }}/scholar/adopt"><input type="hidden" name="csrf" value="{{ user.csrf }}"><button class="btn btn-secondary" type="submit">Use as title (Author - Year - Title)</button></form>{% endif %}
+    <form method="post" action="/doc/{{ doc.id }}/scholar/refs"><input type="hidden" name="csrf" value="{{ user.csrf }}"><input type="hidden" name="resolve" value="yes"><button class="btn btn-secondary" type="submit">Extract &amp; resolve references</button></form>
+  </div>
+  {% if refs %}
+  <details class="notes" open><summary>References: {{ refs.resolved }} of {{ refs.total }} resolved</summary>
+    <ol class="refs">{% for r in refs.refs[:300] %}<li>{{ r.ref.raw }}{% if r.work and r.work.doi %} <a href="https://doi.org/{{ r.work.doi }}" rel="noreferrer">doi:{{ r.work.doi }}</a> <span class="muted small">({{ r.method }}, {{ (100*r.confidence)|round|int }}%)</span>{% elif r.method == 'unresolved' %} <span class="badge badge-warn">unresolved</span>{% endif %}</li>{% endfor %}</ol>
+  </details>
+  {% endif %}
+</section>
+{% endif %}
+
 <div class="two">
   <div>
     {% if has_thumb and doc.status == 'done' %}
@@ -38,7 +71,7 @@
     <section class="card" aria-labelledby="files-h">
       <h2 id="files-h" class="h2">Files</h2>
       <ul class="list plain">
-        {% for key, label in [('layout','Layout text (.layout.txt)'),('markdown','Markdown (.md)'),('text','Plain text (.txt)'),('ocr_pdf','Searchable PDF'),('compressed','Compressed PDF'),('report','Report (.json)'),('original','Original')] %}
+        {% for key, label in [('layout','Layout text (.layout.txt)'),('markdown','Markdown (.md)'),('text','Plain text (.txt)'),('ocr_pdf','Searchable PDF'),('compressed','Compressed PDF'),('report','Report (.json)'),('scholar','Scholarly record (.json)'),('references','References (.json)'),('original','Original')] %}
         {% if key in doc.outputs %}
         <li><a class="row-link" href="/doc/{{ doc.id }}/file/{{ key }}?download=1"><span class="row-main">{{ label }}</span><span class="chev" aria-hidden="true">⤓</span></a></li>
         {% endif %}

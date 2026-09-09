@@ -116,7 +116,7 @@ ignore = ["S101", "S603", "S607"]  # asserts in tests; subprocess use is deliber
 extend-immutable-calls = ["fastapi.Depends", "fastapi.File", "fastapi.Form"]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/*" = ["S"]
+"tests/*" = ["S", "E501"]  # long literal fixtures are fine in tests
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

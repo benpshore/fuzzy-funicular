@@ -54,6 +54,7 @@ STAGE_LABEL = {
     "text": "Plain text",
     "docling": "Converting",
     "index": "Indexing for search",
+    "scholar": "Checking metadata",
     "publish": "Saving to iCloud",
     "done": "Done",
     "failed": "Failed",
@@ -86,6 +87,7 @@ class JobManager:
         self.stopping = False
         self.timings = Timings(settings.data_dir / "timings.json")
         self.index = SearchIndex(settings.data_dir / "search.sqlite3", embed=settings.embeddings)
+        self.fetcher_factory = self._default_fetcher
 
     # ------------------------------------------------------------------ lifecycle
     def start(self, loop: asyncio.AbstractEventLoop) -> None:
@@ -104,6 +106,58 @@ class JobManager:
             ctx.cancel(reason)
         self.guard.stop()
         self.pool.shutdown(wait=False, cancel_futures=True)
+
+    def _default_fetcher(self):
+        from ..scholar.clients import Cache, Fetcher
+
+        return Fetcher(cache=Cache(self.settings.data_dir / "scholar-cache.sqlite3"))
+
+    def scholar_lookup(self, doc_id: str, *, online: bool | None = None) -> dict | None:
+        """Extract identifiers/metadata from a PDF and (optionally) verify online. Writes
+        scholar.json into the document directory and returns it."""
+        from ..scholar.metadata import extract_from_pdf, resolve
+
+        doc = self.store.get(doc_id)
+        if doc is None or doc.kind != "pdf":
+            return None
+        original = doc.dir / doc.outputs.get("original", "")
+        if not original.is_file():
+            return None
+        ex = extract_from_pdf(original)
+        out: dict[str, Any] = {
+            "extracted": ex.to_dict(),
+            "resolution": None,
+            "checked_at": time.time(),
+        }
+        online = self.settings.scholar_auto if online is None else online
+        if online and (ex.ids.any or ex.pdf_title or ex.guessed_title):
+            f = self.fetcher_factory()
+            try:
+                res = resolve(ex, f)
+                out["resolution"] = res.to_dict()
+                if res.work and res.verified:
+                    extra = [
+                        t
+                        for t in (
+                            f"doi:{res.work.doi}" if res.work.doi else "",
+                            str(res.work.year) if res.work.year else "",
+                            res.work.journal[:40] if res.work.journal else "",
+                        )
+                        if t
+                    ]
+                    if extra:
+                        self.store.add_tags(doc_id, extra)
+                    if doc.title == doc.original_name and res.work.title:
+                        self.store.rename(doc_id, res.work.title[:200])
+            except Exception as exc:  # noqa: BLE001 - network is optional here
+                out["error"] = str(exc)[:300]
+            finally:
+                f.close()
+        (doc.dir / "scholar.json").write_text(json.dumps(out, ensure_ascii=False, indent=1))
+        outputs = dict(doc.outputs)
+        outputs["scholar"] = "scholar.json"
+        self.store.set_outputs(doc_id, outputs)
+        return out
 
     def contexts(self) -> list[JobContext]:
         with self._lock:
@@ -556,6 +610,14 @@ class JobManager:
                 log.info("indexing of %s skipped: cancelled", doc_id)
             except Exception as exc:  # search is additive; never fail the document for it
                 log.warning("indexing failed for %s: %s", doc_id, exc)
+            if doc.kind == "pdf":
+                try:
+                    progress("scholar", 0, 1)
+                    self.scholar_lookup(doc_id)
+                except Cancelled:
+                    log.info("scholar lookup of %s skipped: cancelled", doc_id)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("scholar lookup failed for %s: %s", doc_id, exc)
             try:
                 progress("publish", 0, 1)
                 publish_to_archive(self.settings, self.store.get(doc_id))

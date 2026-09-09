@@ -238,6 +238,133 @@ def estimate(
     console.print(f"total ≈ {total:.0f} s")
 
 
+scholar_app = typer.Typer(
+    help="Scholarly metadata: identifiers, verified records, references, renaming."
+)
+app.add_typer(scholar_app, name="scholar")
+
+
+def _fetcher():
+    from .config import Settings
+    from .scholar.clients import Cache, Fetcher
+
+    data_dir = Settings.from_env().data_dir
+    return Fetcher(cache=Cache(data_dir / "scholar-cache.sqlite3"))
+
+
+@scholar_app.command("meta")
+def scholar_meta(
+    pdf: Annotated[Path, typer.Argument(exists=True, dir_okay=False)],
+    resolve: Annotated[bool, typer.Option(help="Look the record up online and verify it")] = True,
+    json_out: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Identifiers and metadata for a PDF; verified against Crossref & co."""
+    from .scholar.metadata import extract_from_pdf
+    from .scholar.metadata import resolve as _resolve
+
+    ex = extract_from_pdf(pdf)
+    out: dict = {"extracted": ex.to_dict()}
+    if resolve:
+        f = _fetcher()
+        try:
+            out["resolution"] = _resolve(ex, f).to_dict()
+        finally:
+            f.close()
+    if json_out:
+        console.print_json(json.dumps(out))
+        return
+    console.print(f"[bold]{pdf.name}[/]")
+    console.print(f"  ids: {ex.ids.to_dict()}")
+    console.print(f"  title guess: {ex.guessed_title or ex.pdf_title or '-'}")
+    res = out.get("resolution")
+    if res:
+        w = res["work"]
+        if w:
+            state = "green]verified" if res["verified"] else "yellow]unverified"
+            console.print(
+                f"  [{state}[/] ({res['confidence']:.2f}): {w['title']} — {w['journal']}"
+                f" {w['year']} — doi:{w['doi']}"
+            )
+            console.print(
+                f"  sources: {', '.join(w['sources'])}; cited by {w.get('cited_by')};"
+                f" OA: {w.get('oa_url') or '-'}"
+            )
+        for e in res["evidence"]:
+            console.print(f"    · {e}")
+
+
+@scholar_app.command("refs")
+def scholar_refs(
+    source: Annotated[
+        Path, typer.Argument(exists=True, dir_okay=False, help="PDF or extracted .txt")
+    ],
+    resolve: Annotated[bool, typer.Option(help="Resolve each reference online")] = False,
+    json_out: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Extract the reference list losslessly; optionally resolve each entry to a DOI."""
+    from .scholar.refs import ReferenceReport, ResolvedRef, extract_references, resolve_reference
+
+    if source.suffix.lower() == ".pdf":
+        import pymupdf
+
+        with pymupdf.open(source) as doc:
+            text = "\f".join(p.get_text("text") for p in doc)
+    else:
+        text = source.read_text(encoding="utf-8", errors="replace")
+    raw = extract_references(text)
+    if resolve:
+        f = _fetcher()
+        try:
+            rep = ReferenceReport([resolve_reference(r, f) for r in raw])
+        finally:
+            f.close()
+    else:
+        rep = ReferenceReport([ResolvedRef(r, None, 0.0, "not resolved") for r in raw])
+    if json_out:
+        console.print_json(json.dumps(rep.to_dict()))
+        return
+    for r in rep.refs:
+        mark = "[green]✓[/]" if r.work and r.confidence >= 0.8 else "[yellow]?[/]"
+        console.print(f"{mark} {r.ref.n:>3}. {r.ref.raw[:110]}")
+        if r.work and r.work.doi:
+            console.print(f"       → doi:{r.work.doi} ({r.method}, {r.confidence:.2f})")
+    console.print(f"{len(rep.refs)} references, {rep.resolved} resolved")
+
+
+@scholar_app.command("rename")
+def scholar_rename(
+    pdfs: Annotated[list[Path], typer.Argument(exists=True, dir_okay=False)],
+    template: Annotated[
+        str, typer.Option(help="e.g. '{author} - {year} - {title}'")
+    ] = "{author} - {year} - {title}",
+    apply: Annotated[bool, typer.Option(help="Actually rename (default is a dry run)")] = False,
+    min_confidence: Annotated[float, typer.Option()] = 0.5,
+) -> None:
+    """Zotero-style renaming from verified metadata. Dry run unless --apply."""
+    from .scholar.metadata import extract_from_pdf
+    from .scholar.metadata import resolve as _resolve
+    from .scholar.rename import apply_rename, plan_rename
+
+    f = _fetcher()
+    try:
+        for pdf in pdfs:
+            res = _resolve(extract_from_pdf(pdf), f)
+            if not res.work or res.confidence < min_confidence:
+                console.print(f"[yellow]skip[/] {pdf.name}: no confident metadata")
+                continue
+            plan = plan_rename(pdf, res.work, template)
+            if not plan.changed:
+                console.print(f"[dim]same[/] {pdf.name}")
+                continue
+            if apply:
+                apply_rename(plan)
+                console.print(f"[green]renamed[/] {pdf.name} → {plan.target.name}")
+            else:
+                console.print(f"[cyan]would rename[/] {pdf.name} → {plan.target.name}")
+    finally:
+        f.close()
+
+
 models_app = typer.Typer(help="Pre-fetch and inspect ML models (docling, Whisper, embeddings).")
 app.add_typer(models_app, name="models")
 
