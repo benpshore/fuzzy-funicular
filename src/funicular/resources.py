@@ -154,27 +154,22 @@ def run(
         job.register(proc.pid)
     deadline = time.monotonic() + timeout
     out = err = b""
+    # communicate() writes stdin with select() and never blocks the loop, so a cancel or
+    # timeout still gets to kill the child. Input goes only on the first call: after a
+    # TimeoutExpired, communicate() must be resumed without it.
+    pending = input_bytes
     try:
-        if input_bytes is not None:
-            # Feed stdin in a thread so a cancel can still kill a blocked child.
-            def _feed() -> None:
-                try:
-                    assert proc.stdin is not None
-                    proc.stdin.write(input_bytes)
-                    proc.stdin.close()
-                except OSError:
-                    pass
-
-            threading.Thread(target=_feed, daemon=True).start()
         while True:
             try:
-                out, err = proc.communicate(timeout=0.25)
+                out, err = proc.communicate(input=pending, timeout=0.25)
+                pending = None
                 if job is not None and job.cancelled:
                     # The cancel killed the child before we noticed; report it as a cancel,
                     # never as a "successful" run with a partial result.
                     raise Cancelled(job.reason or "cancelled")
                 break
             except subprocess.TimeoutExpired:
+                pending = None
                 if job is not None and job.cancelled:
                     kill_tree(proc.pid)
                     out, err = proc.communicate(timeout=5)

@@ -47,6 +47,12 @@ CREATE TABLE IF NOT EXISTS vocab (
     n INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS vocab_key ON vocab(key);
+CREATE TABLE IF NOT EXISTS doc_terms (
+    doc_id TEXT NOT NULL,
+    term TEXT NOT NULL,
+    n INTEGER NOT NULL,
+    PRIMARY KEY (doc_id, term)
+);
 CREATE TABLE IF NOT EXISTS vectors (
     doc_id TEXT NOT NULL,
     idx INTEGER NOT NULL,
@@ -164,7 +170,10 @@ class SearchIndex:
         conn = sqlite3.connect(self.path, timeout=30, isolation_level=None)
         conn.row_factory = sqlite3.Row
         try:
-            conn.execute("BEGIN")
+            # IMMEDIATE: take the write lock up front so the busy timeout applies. A deferred
+            # transaction that reads first and then writes gets SQLITE_BUSY_SNAPSHOT in WAL
+            # mode when a job thread committed in between, and that is never retried.
+            conn.execute("BEGIN IMMEDIATE")
             yield conn
             if conn.in_transaction:
                 conn.execute("COMMIT")
@@ -197,7 +206,7 @@ class SearchIndex:
                     "INSERT INTO chunks_tri (doc_id, idx, norm) VALUES (?,?,?)",
                     (doc_id, ch.idx, norm),
                 )
-            self._update_vocab(c, title + "\n" + text)
+            self._update_vocab(c, doc_id, title + "\n" + text)
             c.execute(
                 "INSERT OR REPLACE INTO docs (doc_id, title, chunks, embedded, updated_at)"
                 " VALUES (?,?,?,0,?)",
@@ -239,8 +248,18 @@ class SearchIndex:
     def _delete(self, c: sqlite3.Connection, doc_id: str) -> None:
         for table in ("chunks", "chunks_fts", "chunks_tri", "vectors"):
             c.execute(f"DELETE FROM {table} WHERE doc_id=?", (doc_id,))  # noqa: S608
+        # Take this document's own counts back out of the corpus vocabulary, so deleting or
+        # re-indexing neither leaves ghost terms nor inflates the phonetic ranking.
+        c.execute(
+            "UPDATE vocab SET n = n - (SELECT n FROM doc_terms WHERE doc_terms.term = vocab.term"
+            " AND doc_terms.doc_id = ?)"
+            " WHERE term IN (SELECT term FROM doc_terms WHERE doc_id = ?)",
+            (doc_id, doc_id),
+        )
+        c.execute("DELETE FROM vocab WHERE n <= 0")
+        c.execute("DELETE FROM doc_terms WHERE doc_id=?", (doc_id,))
 
-    def _update_vocab(self, c: sqlite3.Connection, text: str) -> None:
+    def _update_vocab(self, c: sqlite3.Connection, doc_id: str, text: str) -> None:
         counts: dict[str, int] = defaultdict(int)
         for t in tokens(text):
             if len(t) >= 3 and not t.isdigit():
@@ -253,6 +272,10 @@ class SearchIndex:
                 "INSERT INTO vocab (term, key, n) VALUES (?,?,?)"
                 " ON CONFLICT(term) DO UPDATE SET n = n + excluded.n",
                 (term, key, n),
+            )
+            c.execute(
+                "INSERT OR REPLACE INTO doc_terms (doc_id, term, n) VALUES (?,?,?)",
+                (doc_id, term, n),
             )
 
     def stats(self) -> dict:

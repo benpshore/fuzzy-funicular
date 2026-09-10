@@ -114,3 +114,20 @@ def test_semantic_search_finds_paraphrase(tmp_path):
     assert "semantic" in info.routes
     assert hits and hits[0].doc_id == "a" and hits[0].page == 2
     assert ix.stats()["embedded_documents"] == 2
+
+
+def test_vocab_counts_track_documents_exactly(index):
+    import sqlite3
+
+    def n(term):
+        with sqlite3.connect(index.path) as c:
+            row = c.execute("SELECT n FROM vocab WHERE term=?", (term,)).fetchone()
+        return row[0] if row else 0
+
+    before = n("riluzole")
+    assert before > 0 and n("recipes") > 0
+    index.index_document("a", "Riluzole paper", DOC_A, embed=False)  # re-index: no inflation
+    assert n("riluzole") == before
+    index.remove_document("b")
+    assert n("recipes") == 0  # removed with its document
+    assert n("riluzole") == before

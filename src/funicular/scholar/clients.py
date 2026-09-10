@@ -11,6 +11,7 @@ Keys / etiquette (all optional, via environment):
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -41,7 +42,7 @@ class Cache:
         self._lock = threading.Lock()
         if path:
             path.parent.mkdir(parents=True, exist_ok=True)
-            with sqlite3.connect(path) as c:
+            with contextlib.closing(sqlite3.connect(path)) as c, c:
                 c.execute(
                     "CREATE TABLE IF NOT EXISTS http_cache (k TEXT PRIMARY KEY, t REAL, v TEXT)"
                 )
@@ -49,7 +50,7 @@ class Cache:
     def get(self, key: str) -> Any | None:
         if not self.path:
             return None
-        with self._lock, sqlite3.connect(self.path) as c:
+        with self._lock, contextlib.closing(sqlite3.connect(self.path)) as c:
             row = c.execute("SELECT t, v FROM http_cache WHERE k=?", (key,)).fetchone()
         if not row or time.time() - row[0] > self.ttl:
             return None
@@ -58,7 +59,7 @@ class Cache:
     def put(self, key: str, value: Any) -> None:
         if not self.path:
             return
-        with self._lock, sqlite3.connect(self.path) as c:
+        with self._lock, contextlib.closing(sqlite3.connect(self.path)) as c, c:
             c.execute(
                 "INSERT OR REPLACE INTO http_cache (k, t, v) VALUES (?,?,?)",
                 (key, time.time(), json.dumps(value)),
@@ -134,7 +135,14 @@ class Fetcher:
             if r.status_code >= 400:
                 log.info("%s -> %s", url, r.status_code)
                 return None
-            data = r.json() if json_body else r.text
+            if json_body:
+                try:
+                    data = r.json()
+                except ValueError:
+                    log.info("%s -> 200 but not JSON", url)
+                    return None
+            else:
+                data = r.text
             self.cache.put(key, data)
             return data
         return None

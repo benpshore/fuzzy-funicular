@@ -176,3 +176,15 @@ def test_admission_uses_free_memory():
     guard = MemoryGuard(lambda: [], min_free_mb=0)
     assert guard.admission_ok(1)
     assert not guard.admission_ok(10**9)
+
+
+def test_run_feeds_large_stdin_without_truncation():
+    """stdin bigger than a pipe buffer arrives whole (no racing writer thread, no deadlock)."""
+    payload = bytes(range(256)) * 2048  # 512 KiB
+    proc = run(
+        [sys.executable, "-c", "import sys; sys.stdout.buffer.write(sys.stdin.buffer.read())"],
+        timeout=30,
+        input_bytes=payload,
+    )
+    assert proc.returncode == 0
+    assert proc.stdout == payload
