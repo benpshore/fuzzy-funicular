@@ -86,6 +86,7 @@ class JobManager:
         )
         self.stopping = False
         self._pending_summaries: set[str] = set()
+        self._rerun: dict[str, ExtractSettings | None] = {}
         self.timings = Timings(settings.data_dir / "timings.json")
         self.index = SearchIndex(settings.data_dir / "search.sqlite3", embed=settings.embeddings)
         self.fetcher_factory = self._default_fetcher
@@ -561,6 +562,8 @@ class JobManager:
             return
         with self._lock:
             if doc_id in self._active:
+                # Still running (often just the post-finish steps): run again when it ends.
+                self._rerun[doc_id] = extract
                 return
             self._active[doc_id] = JobContext(id=doc_id)
         self._publish(
@@ -842,6 +845,9 @@ class JobManager:
             current_job.reset(token)
             with self._lock:
                 self._active.pop(doc_id, None)
+                rerun = self._rerun.pop(doc_id, "none")
+            if rerun != "none" and not self.stopping:
+                self.submit(doc_id, rerun)  # type: ignore[arg-type]
 
     def _wait_for_memory(self, ctx: JobContext, doc) -> None:
         """Admission control: hold a job while free memory is below what it is likely to need."""

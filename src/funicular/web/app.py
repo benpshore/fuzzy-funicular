@@ -651,10 +651,8 @@ def create_app(settings: Settings, *, validate: bool = True) -> FastAPI:
         doc = store.get(doc_id)
         if not doc:
             raise HTTPException(404)
-        if doc_id in jobs.active_ids():
-            raise HTTPException(409, "already processing")
         store.requeue(doc_id)
-        jobs.submit(doc_id, _extract_for(settings, ocr))
+        jobs.submit(doc_id, _extract_for(settings, ocr))  # queued behind a running job if any
         store.audit("reprocess", f"{user.login}: {doc_id} ocr={ocr}")
         return _back(request, f"/doc/{doc_id}", {"ok": True, "id": doc_id})
 
