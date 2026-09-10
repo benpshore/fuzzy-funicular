@@ -84,6 +84,8 @@ uv run funicular stop                                  # clean shutdown (jobs ca
   Models, Ollama, LM Studio depending on what is configured.
 * **Feeds** — RSS/Atom, arXiv and PubMed subscriptions; stage new articles (open-access PDF
   fetched, extracted, indexed, record verified, summary written when an LLM is configured).
+  Poll by hand, or set `FUNICULAR_FEEDS_POLL_MINUTES` to poll on a thread inside the server
+  (no cron, no launchd job; it stops with the server).
 * **Zotero** — import PDFs from a collection through Zotero 7's local API.
 * **Graph** — citation neighbourhood of your verified papers (about 40 nodes), similarity
   edges, keyboard/button pan-zoom, list fallback.

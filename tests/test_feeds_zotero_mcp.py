@@ -237,3 +237,45 @@ def test_mcp_server_tools(tmp_path):
     assert tools["get_scholar"].fn(doc.id)["available"] is False
     assert tools["get_document"].fn("nope", "text", 0)["error"] == "not found"
     assert tools["list_documents"].fn(10, None)[0]["id"] == doc.id
+
+
+def test_in_process_feed_poll_thread(tmp_path):
+    """FEEDS_POLL_MINUTES>0 polls on a background thread that survives errors and stops cleanly."""
+    import asyncio
+    import time
+
+    from funicular.web.jobs import JobManager
+    from funicular.web.store import Store
+    from test_web import make_settings
+
+    settings = make_settings(tmp_path, feeds_poll_minutes=1)
+    store = Store(settings.data_dir / "funicular.sqlite3")
+    jm = JobManager(settings, store)
+    calls = []
+
+    def fake_poll(feed_id=None):
+        calls.append(time.monotonic())
+        if len(calls) == 1:
+            raise RuntimeError("network down")
+        return {1: 2}
+
+    jm.poll_feeds = fake_poll
+    jm._poll_interval = 0.02
+    loop = asyncio.new_event_loop()
+    try:
+        jm.start(loop)
+        deadline = time.monotonic() + 5
+        while len(calls) < 3 and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert len(calls) >= 3, "poller did not keep running after an error"
+        jm.stop()
+        jm._poller.join(timeout=2)
+        assert not jm._poller.is_alive()
+    finally:
+        loop.close()
+
+    # Off by default: no thread is started.
+    jm2 = JobManager(make_settings(tmp_path / "b"), Store(tmp_path / "b" / "f.sqlite3"))
+    jm2.start(loop)
+    assert jm2._poller is None
+    jm2.stop()

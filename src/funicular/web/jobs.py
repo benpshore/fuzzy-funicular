@@ -96,6 +96,9 @@ class JobManager:
         self.feeds = FeedStore(settings.data_dir / "feeds.sqlite3")
         self.zotero_factory = self._default_zotero
         self.feed_transport = None  # tests inject an httpx transport for PDF downloads
+        self._poll_stop = threading.Event()
+        self._poller: threading.Thread | None = None
+        self._poll_interval = max(60.0, settings.feeds_poll_minutes * 60.0)
 
     # ------------------------------------------------------------------ lifecycle
     def start(self, loop: asyncio.AbstractEventLoop) -> None:
@@ -106,10 +109,14 @@ class JobManager:
         for doc in self.store.list(status="queued") + self.store.list(status="running"):
             self.store.requeue(doc.id)
             self.submit(doc.id)
+        if self.settings.feeds_poll_minutes > 0 and self._poller is None:
+            self._poller = threading.Thread(target=self._poll_loop, name="feed-poller", daemon=True)
+            self._poller.start()
 
     def stop(self, reason: str = "server shutting down") -> None:
         """Clean exit: cancel every job (killing its process tree), stop the guard."""
         self.stopping = True
+        self._poll_stop.set()
         for ctx in self.contexts():
             ctx.cancel(reason)
         self.guard.stop()
@@ -313,14 +320,51 @@ class JobManager:
             feed = self.feeds.get(fid)
             if feed and feed.get("auto_stage"):
                 for e in self.feeds.entries(fid, status="new", limit=50):
-                    self.pool.submit(self._safe_stage, e["id"])
+                    self.submit_stage(e["id"])
         return counts
 
+    def _poll_loop(self) -> None:
+        """In-process feed poll every ``feeds_poll_minutes`` while the server runs.
+
+        Waits the interval first so startup stays quick, and never lets a broken feed or a
+        network outage kill the thread."""
+        while not self._poll_stop.wait(self._poll_interval):
+            if self.stopping:
+                break
+            try:
+                counts = self.poll_feeds()
+                if any(counts.values()):
+                    log.info("feed poll: %s new entries", sum(counts.values()))
+            except Exception as exc:  # noqa: BLE001 - the loop must survive
+                log.warning("feed poll failed: %s", exc)
+
+    def submit_stage(self, entry_id: int) -> bool:
+        """Stage a feed entry as a tracked job (visible on /system, cancellable, guarded)."""
+        key = f"feed:{entry_id}"
+        with self._lock:
+            if key in self._active:
+                return False
+            self._active[key] = JobContext(id=key)
+        self.pool.submit(self._safe_stage, entry_id)
+        return True
+
     def _safe_stage(self, entry_id: int) -> None:
+        key = f"feed:{entry_id}"
+        with self._lock:
+            ctx = self._active.get(key)
+        token = current_job.set(ctx) if ctx else None
         try:
             self.stage_entry(entry_id)
+        except Cancelled:
+            log.info("staging entry %s cancelled", entry_id)
         except Exception as exc:  # noqa: BLE001
             log.warning("staging entry %s failed: %s", entry_id, exc)
+            self.feeds.set_status(entry_id, "failed", note=str(exc)[:200])
+        finally:
+            if token is not None:
+                current_job.reset(token)
+            with self._lock:
+                self._active.pop(key, None)
 
     # ------------------------------------------------------------------ zotero
     def import_zotero(
@@ -717,6 +761,97 @@ class JobManager:
             current_job.reset(token)
             with self._lock:
                 self._active.pop(key, None)
+
+    # ------------------------------------------------------------------ PDF/A
+    def submit_pdfa(self, doc_id: str, level: int = 2) -> bool:
+        key = f"pdfa:{doc_id}"
+        with self._lock:
+            if key in self._active:
+                return False
+            self._active[key] = JobContext(id=key)
+        self._publish(
+            {
+                "type": "progress",
+                "id": doc_id,
+                "status": "done",
+                "stage": "pdfa",
+                "label": "Converting to PDF/A",
+                "progress": 99,
+            }
+        )
+        self.pool.submit(self._run_pdfa, doc_id, level)
+        return True
+
+    def _run_pdfa(self, doc_id: str, level: int) -> None:
+        from .. import pdftools as pt
+
+        key = f"pdfa:{doc_id}"
+        with self._lock:
+            ctx = self._active.get(key)
+        doc = self.store.get(doc_id)
+        if ctx is None or doc is None:
+            with self._lock:
+                self._active.pop(key, None)
+            return
+        token = current_job.set(ctx)
+        try:
+            src = doc.dir / doc.outputs.get("original", "")
+            res = pt.to_pdfa(src, doc.dir / "pdfa.pdf", level=level)
+            outputs = dict(doc.outputs)
+            outputs["pdfa"] = "pdfa.pdf"
+            self.store.set_outputs(doc_id, outputs)
+            an_path = doc.dir / "pdf-analysis.json"
+            try:
+                an = json.loads(an_path.read_text()) if an_path.is_file() else {}
+            except OSError, ValueError:
+                an = {}
+            an["pdfa_result"] = res
+            an_path.write_text(json.dumps(an, ensure_ascii=False))
+            self.store.audit("pdf.pdfa", f"{doc_id}: claims={res['claims']}")
+            self._publish(
+                {
+                    "type": "done",
+                    "id": doc_id,
+                    "status": "done",
+                    "stage": "done",
+                    "label": "Done",
+                    "progress": 100,
+                    "needs_ocr": doc.needs_ocr,
+                    "warnings": doc.warnings,
+                    "pdfa": res,
+                }
+            )
+        except Exception as exc:  # noqa: BLE001 - reported on the document, never silent
+            log.warning("PDF/A failed for %s: %s", doc_id, exc)
+            self._publish(
+                {
+                    "type": "done",
+                    "id": doc_id,
+                    "status": "done",
+                    "stage": "done",
+                    "label": "Done",
+                    "progress": 100,
+                    "needs_ocr": doc.needs_ocr,
+                    "warnings": doc.warnings + [f"PDF/A conversion failed: {exc}"],
+                }
+            )
+        finally:
+            current_job.reset(token)
+            with self._lock:
+                self._active.pop(key, None)
+
+    def wait_idle(self, doc_id: str, timeout: float = 15.0) -> bool:
+        """Cancel and wait for every job touching a document to leave the active set."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            with self._lock:
+                keys = [k for k in self._active if k == doc_id or k.endswith(f":{doc_id}")]
+                for k in keys:
+                    self._active[k].cancel("document deleted")
+            if not keys:
+                return True
+            time.sleep(0.1)
+        return False
 
     def cancel_batch(self, bid: str) -> bool:
         return self.cancel(f"batch:{bid}", "batch cancelled by user")
