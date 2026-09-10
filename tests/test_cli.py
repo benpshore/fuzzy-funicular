@@ -57,3 +57,8 @@ def test_models_status_command(tmp_path, monkeypatch):
     monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path / "hf"))
     r = runner.invoke(app, ["models", "status"])
     assert r.exit_code == 0 and "whisper" in r.output
+
+
+def test_deps_command():
+    r = runner.invoke(app, ["deps", "--depth", "1"])
+    assert r.exit_code == 0 and "fuzzy-funicular" in r.output

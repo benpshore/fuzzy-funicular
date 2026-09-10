@@ -12,15 +12,20 @@
       <input id="files" name="files" type="file" multiple
         accept=".pdf,.png,.jpg,.jpeg,.heic,.tif,.tiff,.webp,.docx,.pptx,.xlsx,.html,.htm,.md,.txt,.csv,.epub,.mp3,.m4a,.wav,.flac,.ogg,.mp4,.mov,application/pdf,image/*,audio/*,video/*">
     </label>
-    <fieldset class="row" aria-label="Text recognition">
-      <legend class="label">Text recognition (OCR) for scans and photos</legend>
-      <label class="choice"><input type="radio" name="ocr" value="off" {% if ocr_default == 'off' %}checked{% endif %}> Off</label>
-      <label class="choice"><input type="radio" name="ocr" value="auto" {% if ocr_default == 'auto' %}checked{% endif %}> Only where needed</label>
-      <label class="choice"><input type="radio" name="ocr" value="force" {% if ocr_default == 'force' %}checked{% endif %}> Everything</label>
+    <fieldset class="row" aria-label="Mode">
+      <legend class="label">Mode</legend>
+      <label class="choice"><input type="radio" name="ocr" value="smart" checked> Auto — OCR only where a page looks scanned, verify records, tag and index</label>
     </fieldset>
     <details class="adv"><summary>Advanced</summary>
+      <fieldset class="row" aria-label="Text recognition">
+        <legend class="label">Text recognition (OCR)</legend>
+        <label class="choice"><input type="radio" name="ocr" value="off"> Off</label>
+        <label class="choice"><input type="radio" name="ocr" value="auto"> Only where needed</label>
+        <label class="choice"><input type="radio" name="ocr" value="force"> Everything (figures too)</label>
+      </fieldset>
       <label class="label" for="upload-password">Password for protected PDFs (used once, never stored)</label>
       <input class="input" id="upload-password" name="password" type="password" autocomplete="off">
+      <p class="muted small">Server default when nothing is chosen: OCR {{ ocr_default }}. Apple Vision is used on macOS; tesseract elsewhere.</p>
     </details>
     <button class="btn btn-secondary" type="submit" id="upload-submit">Upload</button>
     <p id="upload-status" class="status" role="status" aria-live="polite"></p>

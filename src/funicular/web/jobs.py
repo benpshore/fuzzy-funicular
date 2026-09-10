@@ -865,7 +865,7 @@ class JobManager:
 
     def _run_job(self, doc_id: str, doc, ctx: JobContext, extract: ExtractSettings) -> None:
         last = {"t": 0.0}
-        finished = False
+        state = {"finished": False}
         clock: dict[str, float] = {}
 
         def progress(stage: str, done: int, total: int) -> None:
@@ -879,12 +879,15 @@ class JobManager:
             if now - last["t"] < 0.15 and done != total:
                 return
             last["t"] = now
-            self.store.update_progress(doc_id, stage, pct)
+            # Once finished, later stages (index, scholar, publish) must not flip the
+            # document back to "running": it is already usable.
+            status = "done" if state["finished"] else "running"
+            self.store.update_progress(doc_id, stage, pct, status=status)
             self._publish(
                 {
                     "type": "progress",
                     "id": doc_id,
-                    "status": "running",
+                    "status": status,
                     "stage": stage,
                     "label": STAGE_LABEL.get(stage, stage),
                     "progress": pct,
@@ -937,7 +940,7 @@ class JobManager:
                 outputs=outputs,
                 body_text=body,
             )
-            finished = True
+            state["finished"] = True
             # Everything from here on is additive (search index, iCloud archive, eviction):
             # a cancel or an error must never flip a finished document back to failed.
             try:
@@ -989,7 +992,7 @@ class JobManager:
         except Cancelled as exc:
             log.info("job %s cancelled: %s", doc_id, exc)
             ctx.kill_children()
-            if finished:
+            if state["finished"]:
                 return
             self.store.fail(doc_id, f"Cancelled: {exc}")
             self._publish(
@@ -1006,7 +1009,7 @@ class JobManager:
         except Exception as exc:
             log.exception("ingest failed for %s", doc_id)
             ctx.kill_children()
-            if finished:
+            if state["finished"]:
                 return
             self.store.fail(doc_id, f"{type(exc).__name__}: {exc}")
             self._publish(

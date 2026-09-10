@@ -1124,3 +1124,27 @@ def test_pdf_tools_routes(client, fixtures, tmp_path):
     r = client.get(f"/doc/{d4}/file/filled")
     with pymupdf.open(stream=r.content, filetype="pdf") as fd:
         assert "B. Shore" in fd[0].get_text()
+
+
+def test_auto_mode_and_rate_limit(client, fixtures):
+    csrf = sign_in(client)
+    r = client.get("/")
+    assert 'value="smart" checked' in r.text and "Advanced" in r.text
+    r = client.post(
+        "/upload",
+        files=[("files", ("s.pdf", fixtures["scan"].read_bytes(), "application/pdf"))],
+        data={"csrf": csrf, "ocr": "smart"},
+        headers={"Accept": "application/json"},
+    )
+    doc_id = r.json()["created"][0]["id"]
+    d = wait_done(client, doc_id)
+    # Auto mode OCRs the scan when a backend exists; otherwise it flags it. Never both silent.
+    assert d["ocr_used"] or d["needs_ocr"] or any("OCR" in w for w in d["warnings"])
+    codes = [
+        client.post(
+            "/ask", data={"csrf": csrf, "question": "x"}, headers={"Accept": "application/json"}
+        ).status_code
+        for _ in range(35)
+    ]
+    assert 429 in codes
+    assert client.get("/").headers["x-robots-tag"].startswith("noindex")
