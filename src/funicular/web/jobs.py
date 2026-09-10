@@ -920,7 +920,7 @@ class JobManager:
                     metadata={"year": (res.stats.get("info") or {}).get("year")},
                     hints=[t for t in doc.tags if ":" in t],
                     scanned=bool(signal.get("is_scanned_document")),
-                    ocr_used=bool(res.stats.get("ocr_pages")) or "ocr_backend" in res.stats,
+                    ocr_used=bool(res.stats.get("ocr_pages")) or bool(res.stats.get("ocr_backend")),
                 )
                 keep = [t for t in doc.tags if t not in auto.tags]
                 self.store.set_tags(doc_id, auto.tags + keep)
@@ -931,7 +931,7 @@ class JobManager:
                 title=title,
                 pages=int(res.stats.get("pages") or 0),
                 needs_ocr=res.needs_ocr,
-                ocr_used=bool(res.stats.get("ocr_pages")) or "ocr_backend" in res.stats,
+                ocr_used=bool(res.stats.get("ocr_pages")) or bool(res.stats.get("ocr_backend")),
                 preview=res.text_preview,
                 warnings=res.warnings,
                 outputs=outputs,
@@ -1089,4 +1089,11 @@ def _suffix_for(key: str, src: Path) -> str:
         "report": ".report.json",
         "ocr_pdf": ".ocr.pdf",
         "compressed": ".compressed.pdf",
+        "pdfa": ".pdfa.pdf",
+        "filled": ".filled.pdf",
+        "encrypted": ".encrypted.pdf",
+        "stripped": ".stripped.txt",
+        "summary": ".summary.json",
+        "scholar": ".scholar.json",
+        "references": ".references.json",
     }.get(key, src.suffix)

@@ -58,6 +58,66 @@
 </section>
 
 {% if doc.kind == 'pdf' %}
+<section class="card" aria-labelledby="pdf-h">
+  <h2 id="pdf-h" class="h2">PDF tools</h2>
+  {% if analysis and analysis.get('locked') %}
+  <p class="bad">This PDF is password protected; nothing could be extracted.</p>
+  <form method="post" action="/doc/{{ doc.id }}/pdf/unlock" class="stack">
+    <input type="hidden" name="csrf" value="{{ user.csrf }}">
+    <label class="label" for="pw">Password</label>
+    <input class="input" id="pw" name="password" type="password" autocomplete="off">
+    <button class="btn btn-primary" type="submit">Unlock and extract</button>
+  </form>
+  {% elif analysis %}
+  <dl class="kv">
+    <dt>Encryption</dt><dd>{% if analysis.encryption.encrypted %}encrypted{% else %}none{% endif %}</dd>
+    <dt>PDF/A</dt><dd>{% if analysis.get('pdfa') %}claims PDF/A-{{ analysis.pdfa }}{% else %}not PDF/A{% endif %}{% if analysis.get('pdfa_result') %} · converted copy claims {{ analysis.pdfa_result.claims or 'nothing' }}{% for w in analysis.pdfa_result.warnings %} · {{ w }}{% endfor %}{% endif %}</dd>
+    <dt>Pages</dt><dd>{{ analysis.pagination.pages }}{% if analysis.pagination.offset is not none %} · printed folio = page {{ '+' if analysis.pagination.offset >= 0 else '' }}{{ analysis.pagination.offset }}{% endif %}{% if analysis.pagination.labels|select|list %} · labels {{ analysis.pagination.labels[:6]|join(', ') }}{% endif %}</dd>
+    <dt>Header / footer</dt><dd>{% if analysis.headers_footers.headers or analysis.headers_footers.footers %}{{ (analysis.headers_footers.headers + analysis.headers_footers.footers)|join(' · ') }}{% if 'stripped' in doc.outputs %} · <a href="/doc/{{ doc.id }}/file/stripped">text without them</a>{% endif %}{% else %}none detected{% endif %}</dd>
+    <dt>Signatures</dt><dd>{% if analysis.signatures %}{% for s in analysis.signatures %}p.{{ s.page }} {{ s.kind }}{% if s.name %} “{{ s.name }}”{% endif %}{% if s.signed is not none %} ({{ 'signed' if s.signed else 'unsigned' }}){% endif %}{% if not loop.last %}; {% endif %}{% endfor %}{% else %}none found{% endif %}</dd>
+    <dt>Outline</dt><dd>{{ analysis.outline.source }} ({{ analysis.outline.pdf_outline_entries }} PDF entries, {{ analysis.outline.markdown_headings }} headings)</dd>
+  </dl>
+  {% if analysis.outline.outline %}
+  <details class="notes"><summary>Heading structure</summary>
+    {% macro tree(nodes) %}<ul>{% for n in nodes %}<li>{{ n.title }}{% if n.page %} <span class="muted small">p.{{ n.page }}</span>{% endif %}{% if n.children %}{{ tree(n.children) }}{% endif %}</li>{% endfor %}</ul>{% endmacro %}
+    {{ tree(analysis.outline.outline) }}
+  </details>
+  {% endif %}
+  {% if analysis.fields %}
+  <details class="notes"><summary>Form fields ({{ analysis.fields|length }})</summary>
+    <form method="post" action="/doc/{{ doc.id }}/pdf/fill" class="stack">
+      <input type="hidden" name="csrf" value="{{ user.csrf }}">
+      {% for f in analysis.fields %}
+      <label class="label" for="f_{{ loop.index }}">{{ f.name }} <span class="muted small">({{ f.type }}, p.{{ f.page }})</span></label>
+      {% if f.type == 'CheckBox' %}<label class="choice"><input type="checkbox" id="f_{{ loop.index }}" name="f_{{ f.name }}" value="true" {% if f.value not in ('', 'Off') %}checked{% endif %}> checked</label>
+      {% elif f.options %}<select class="input" id="f_{{ loop.index }}" name="f_{{ f.name }}">{% for o in f.options %}<option {% if o == f.value %}selected{% endif %}>{{ o }}</option>{% endfor %}</select>
+      {% elif f.type != 'Signature' %}<input class="input" id="f_{{ loop.index }}" name="f_{{ f.name }}" value="{{ f.value }}">{% endif %}
+      {% endfor %}
+      <label class="choice"><input type="checkbox" name="flatten" value="yes"> Flatten (bake fields into the page)</label>
+      <button class="btn btn-secondary" type="submit">Write filled copy</button>
+    </form>
+  </details>
+  {% endif %}
+  {% else %}
+  <p class="muted">Not analysed yet.</p>
+  {% endif %}
+  <div class="chips">
+    <form method="post" action="/doc/{{ doc.id }}/pdf/analyze"><input type="hidden" name="csrf" value="{{ user.csrf }}"><button class="btn btn-secondary" type="submit">Analyse PDF</button></form>
+    {% if not (analysis and analysis.get('locked')) %}
+    <form method="post" action="/doc/{{ doc.id }}/pdf/pdfa"><input type="hidden" name="csrf" value="{{ user.csrf }}"><input type="hidden" name="level" value="2"><button class="btn btn-secondary" type="submit">Convert to PDF/A-2b</button></form>
+    <details class="adv"><summary>Encrypt a copy</summary>
+      <form method="post" action="/doc/{{ doc.id }}/pdf/encrypt" class="stack">
+        <input type="hidden" name="csrf" value="{{ user.csrf }}">
+        <label class="label" for="encpw">Password (AES-256)</label>
+        <input class="input" id="encpw" name="password" type="password" autocomplete="new-password" minlength="4">
+        <label class="choice"><input type="checkbox" name="allow_copy" value="yes"> Allow copying text</label>
+        <button class="btn btn-secondary" type="submit">Write encrypted copy</button>
+      </form>
+    </details>
+    {% endif %}
+  </div>
+</section>
+
 <section class="card" aria-labelledby="sch-h">
   <h2 id="sch-h" class="h2">Scholarly record</h2>
   {% set w = scholar.resolution.work if scholar and scholar.resolution else None %}
@@ -99,7 +159,7 @@
     <section class="card" aria-labelledby="files-h">
       <h2 id="files-h" class="h2">Files</h2>
       <ul class="list plain">
-        {% for key, label in [('layout','Layout text (.layout.txt)'),('markdown','Markdown (.md)'),('text','Plain text (.txt)'),('ocr_pdf','Searchable PDF'),('compressed','Compressed PDF'),('report','Report (.json)'),('scholar','Scholarly record (.json)'),('summary','Evidence card (.json)'),('references','References (.json)'),('original','Original')] %}
+        {% for key, label in [('layout','Layout text (.layout.txt)'),('markdown','Markdown (.md)'),('text','Plain text (.txt)'),('ocr_pdf','Searchable PDF'),('compressed','Compressed PDF'),('report','Report (.json)'),('scholar','Scholarly record (.json)'),('summary','Evidence card (.json)'),('pdfa','PDF/A copy'),('filled','Filled form'),('encrypted','Encrypted copy'),('stripped','Text without headers/footers'),('references','References (.json)'),('original','Original')] %}
         {% if key in doc.outputs %}
         <li><a class="row-link" href="/doc/{{ doc.id }}/file/{{ key }}?download=1"><span class="row-main">{{ label }}</span><span class="chev" aria-hidden="true">⤓</span></a></li>
         {% endif %}
