@@ -8,6 +8,7 @@ Tools are read-only except `ask`, which sends passages to the configured LLM pro
 
 from __future__ import annotations
 
+import hmac
 import json
 import os
 from pathlib import Path
@@ -144,7 +145,8 @@ def run(transport: str = "stdio", port: int = 8788) -> None:
 
     class Bearer(BaseHTTPMiddleware):
         async def dispatch(self, request, call_next):
-            if request.headers.get("authorization") != f"Bearer {token}":
+            supplied = request.headers.get("authorization", "")
+            if not hmac.compare_digest(supplied.encode(), f"Bearer {token}".encode()):
                 return JSONResponse({"error": "unauthorized"}, status_code=401)
             return await call_next(request)
 

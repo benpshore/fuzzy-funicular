@@ -365,3 +365,29 @@ def test_rename_plan(tmp_path):
     assert plan2.target.exists() and not src.exists()
     assert rename.build_name(w, "{year}-{first_author}-{journal}") == "2017-Hardiman-Nat Rev"
     assert rename.build_name(w, "{nope}") == rename.build_name(w)
+
+
+def test_fetcher_treats_non_json_200_as_miss(tmp_path):
+    def handler(request):
+        return httpx.Response(200, text="<html>gateway hiccup</html>")
+
+    f = clients.Fetcher(
+        cache=clients.Cache(tmp_path / "c.sqlite3"), transport=httpx.MockTransport(handler)
+    )
+    f.MIN_INTERVAL = {}
+    try:
+        assert f.crossref_work(DOI) is None
+    finally:
+        f.close()
+
+
+def test_cache_closes_connections(tmp_path):
+    import psutil
+
+    cache = clients.Cache(tmp_path / "c.sqlite3")
+    me = psutil.Process()
+    base = me.num_fds()
+    for i in range(50):
+        cache.put(f"k{i}", {"i": i})
+        assert cache.get(f"k{i}") == {"i": i}
+    assert me.num_fds() - base < 5

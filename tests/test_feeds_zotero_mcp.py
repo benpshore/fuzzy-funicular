@@ -107,6 +107,7 @@ def test_find_pdf_and_download(poller, tmp_path):
     assert not (tmp_path / "b.pdf").exists()
     with pytest.raises(ValueError):
         p.download_pdf("https://arxiv.org/pdf/2609.01234v1", tmp_path / "c.pdf", max_bytes=5)
+    assert not (tmp_path / "c.pdf").exists()  # no partial file left behind
 
 
 # ---------------------------------------------------------------- zotero

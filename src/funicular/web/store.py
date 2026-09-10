@@ -181,7 +181,10 @@ class Store:
         try:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA foreign_keys=ON")
-            conn.execute("BEGIN")
+            # IMMEDIATE: take the write lock up front so the busy timeout applies. A deferred
+            # transaction that reads first and then writes gets SQLITE_BUSY_SNAPSHOT in WAL
+            # mode when a job thread committed in between, and that is never retried.
+            conn.execute("BEGIN IMMEDIATE")
             yield conn
             if conn.in_transaction:
                 conn.execute("COMMIT")

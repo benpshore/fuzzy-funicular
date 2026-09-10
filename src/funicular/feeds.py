@@ -72,8 +72,12 @@ class FeedStore:
     def __init__(self, path: Path) -> None:
         self.path = path
         path.parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(path) as c:
-            c.executescript(SCHEMA)
+        conn = sqlite3.connect(path, timeout=30)
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")  # poll thread and requests both write
+            conn.executescript(SCHEMA)
+        finally:
+            conn.close()
 
     @contextmanager
     def _conn(self):
@@ -329,19 +333,23 @@ class Poller:
         return None
 
     def download_pdf(self, url: str, dest: Path, *, max_bytes: int = 200 * 2**20) -> Path:
-        with self.http.stream("GET", url) as r:
-            r.raise_for_status()
-            size = 0
-            with dest.open("wb") as fh:
-                for chunk in r.iter_bytes():
-                    size += len(chunk)
-                    if size > max_bytes:
-                        raise ValueError("PDF larger than the staging limit")
-                    fh.write(chunk)
-        head = dest.read_bytes()[:5]
-        if not head.startswith(b"%PDF"):
+        try:
+            with self.http.stream("GET", url) as r:
+                r.raise_for_status()
+                size = 0
+                with dest.open("wb") as fh:
+                    for chunk in r.iter_bytes():
+                        size += len(chunk)
+                        if size > max_bytes:
+                            raise ValueError("PDF larger than the staging limit")
+                        fh.write(chunk)
+            with dest.open("rb") as fh:
+                head = fh.read(5)
+            if not head.startswith(b"%PDF"):
+                raise ValueError("URL did not return a PDF")
+        except BaseException:
             dest.unlink(missing_ok=True)
-            raise ValueError("URL did not return a PDF")
+            raise
         return dest
 
 
