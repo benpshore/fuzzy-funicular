@@ -78,6 +78,7 @@ SECURITY_HEADERS = {
     b"permissions-policy": b"camera=(), microphone=(), geolocation=(), payment=()",
     b"cross-origin-opener-policy": b"same-origin",
     b"cross-origin-resource-policy": b"same-origin",
+    b"x-robots-tag": b"noindex, nofollow",
 }
 
 
@@ -161,6 +162,12 @@ def create_app(settings: Settings, *, validate: bool = True) -> FastAPI:
     auth = Auth(settings, store)
     watcher = InboxWatcher(settings, store, jobs) if settings.watch_inbox else None
     upload_limiter = RateLimiter(limit=60, window=60)
+    # Expensive operations (LLM calls, PDF/A, graph builds, online lookups): per user per minute.
+    heavy_limiter = RateLimiter(limit=30, window=60)
+
+    def heavy(user: User, what: str) -> None:
+        if not heavy_limiter.check(f"{what}:{user.id}"):
+            raise HTTPException(429, f"too many {what} requests; wait a minute")
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -829,6 +836,7 @@ def create_app(settings: Settings, *, validate: bool = True) -> FastAPI:
         user: User = Depends(require_user),
     ):
         csrf_check(request, user, csrf)
+        heavy(user, "pdfa")
         doc = store.get(doc_id)
         if not doc:
             raise HTTPException(404)
@@ -917,6 +925,7 @@ def create_app(settings: Settings, *, validate: bool = True) -> FastAPI:
         user: User = Depends(require_user),
     ):
         csrf_check(request, user, csrf)
+        heavy(user, "graph")
         from ..embeddings import get_embedder
         from ..graph import build_graph
 
@@ -1001,6 +1010,7 @@ def create_app(settings: Settings, *, validate: bool = True) -> FastAPI:
         user: User = Depends(require_user),
     ):
         csrf_check(request, user, csrf)
+        heavy(user, "feeds")
         counts = jobs.poll_feeds(fid)
         store.audit("feed.poll", f"{user.login}: {counts}")
         return _back(request, "/feeds", {"ok": True, "new": counts})
@@ -1028,6 +1038,7 @@ def create_app(settings: Settings, *, validate: bool = True) -> FastAPI:
         user: User = Depends(require_user),
     ):
         csrf_check(request, user, csrf)
+        heavy(user, "feeds")
         n = 0
         for e in jobs.feeds.entries(fid, status="new", limit=100):
             jobs.pool.submit(jobs._safe_stage, e["id"])  # noqa: SLF001
@@ -1079,6 +1090,7 @@ def create_app(settings: Settings, *, validate: bool = True) -> FastAPI:
         user: User = Depends(require_user),
     ):
         csrf_check(request, user, csrf)
+        heavy(user, "summarize")
         doc = store.get(doc_id)
         if not doc:
             raise HTTPException(404)
@@ -1121,6 +1133,7 @@ def create_app(settings: Settings, *, validate: bool = True) -> FastAPI:
     ):
         """Grounded answer over the library (or one document) with passage citations."""
         csrf_check(request, user, csrf)
+        heavy(user, "ask")
         from ..llm import LLMUnavailable
         from ..summarize import ask
 
@@ -1181,6 +1194,7 @@ def create_app(settings: Settings, *, validate: bool = True) -> FastAPI:
         request: Request, doc_id: str, csrf: str = Form(""), user: User = Depends(require_user)
     ):
         csrf_check(request, user, csrf)
+        heavy(user, "scholar")
         doc = store.get(doc_id)
         if not doc or doc.kind != "pdf":
             raise HTTPException(404)
@@ -1198,6 +1212,7 @@ def create_app(settings: Settings, *, validate: bool = True) -> FastAPI:
     ):
         """Extract the reference list (lossless) and optionally resolve each entry online."""
         csrf_check(request, user, csrf)
+        heavy(user, "scholar")
         doc = store.get(doc_id)
         if not doc:
             raise HTTPException(404)
@@ -1362,6 +1377,7 @@ def create_app(settings: Settings, *, validate: bool = True) -> FastAPI:
         user: User = Depends(require_user),
     ):
         csrf_check(request, user, csrf)
+        heavy(user, "compress")
         doc = store.get(doc_id)
         if not doc or doc.kind != "pdf":
             raise HTTPException(404)
@@ -1495,7 +1511,11 @@ def _sniff_kind(path: Path) -> str:
 
 
 def _extract_for(settings: Settings, ocr: str) -> ExtractSettings:
+    """'smart' = the Auto mode: OCR only where a page looks scanned; otherwise an explicit
+    off/auto/force from the advanced controls; anything else keeps the server default."""
     base = settings.extract
+    if ocr == "smart":
+        return base.model_copy(update={"ocr": "auto"})
     if ocr in ("off", "auto", "force"):
         return base.model_copy(update={"ocr": ocr})
     return base

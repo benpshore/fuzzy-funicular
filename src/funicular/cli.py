@@ -642,6 +642,37 @@ def pdf_fill_cmd(
     console.print_json(json.dumps(res))
 
 
+@app.command()
+def deps(
+    outdated: Annotated[bool, typer.Option(help="Show newer versions available on PyPI")] = False,
+    depth: Annotated[int, typer.Option()] = 1,
+) -> None:
+    """Inspect the locked dependency tree (uv tree); --outdated checks for upgrades.
+
+    Upgrade flow: `uv lock --upgrade` (or `--upgrade-package X`), `uv sync --all-extras`,
+    `uv run pytest`, then commit pyproject.toml and uv.lock together.
+    """
+    import shutil
+    import subprocess
+
+    uv = shutil.which("uv") or str(Path.home() / ".local" / "bin" / "uv")
+    if not Path(uv).exists():
+        err.print("[red]uv not found; install with `brew install uv`")
+        raise typer.Exit(code=2)
+    argv = [uv, "tree", "--depth", str(depth), "--all-groups"]
+    if outdated:
+        argv.append("--outdated")
+    proc = subprocess.run(argv, capture_output=True, text=True, timeout=300, check=False)  # noqa: S603
+    console.print(proc.stdout or proc.stderr)
+    ver = subprocess.run([uv, "--version"], capture_output=True, text=True, timeout=30, check=False)  # noqa: S603
+    py = subprocess.run(
+        [uv, "python", "find"], capture_output=True, text=True, timeout=30, check=False
+    )  # noqa: S603
+    console.print(f"[dim]{ver.stdout.strip()} · python {py.stdout.strip()}")
+    if proc.returncode != 0:
+        raise typer.Exit(code=proc.returncode)
+
+
 models_app = typer.Typer(help="Pre-fetch and inspect ML models (docling, Whisper, embeddings).")
 app.add_typer(models_app, name="models")
 
