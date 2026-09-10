@@ -391,6 +391,7 @@ def create_app(settings: Settings, *, validate: bool = True) -> FastAPI:
             refs=refs_report,
             summary=_summary_json(doc),
             providers=_providers(),
+            analysis=_analysis_json(doc),
         )
 
     # -------------------------------------------------------------- files
@@ -403,7 +404,7 @@ def create_app(settings: Settings, *, validate: bool = True) -> FastAPI:
         if not path.is_file() or doc.dir.resolve() not in path.parents:
             raise HTTPException(404)
         media = "text/plain; charset=utf-8"
-        if key in ("original", "ocr_pdf", "compressed"):
+        if key in ("original", "ocr_pdf", "compressed", "pdfa", "filled", "encrypted"):
             media = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
         if key in ("report", "scholar", "references", "summary"):
             media = "application/json"
@@ -457,6 +458,7 @@ def create_app(settings: Settings, *, validate: bool = True) -> FastAPI:
         files: list[UploadFile] = File(...),
         csrf: str = Form(""),
         ocr: str = Form(""),
+        password: str = Form(""),
         user: User = Depends(require_user),
     ):
         csrf_check(request, user, csrf)
@@ -469,6 +471,16 @@ def create_app(settings: Settings, *, validate: bool = True) -> FastAPI:
             name = f.filename or "upload"
             try:
                 staged, sha, size = await asyncio.to_thread(stage_stream, settings, f.file, name)
+                if password and _sniff_kind(staged) == "pdf":
+                    from .. import pdftools as pt
+
+                    try:
+                        if pt.encryption_info(staged).needs_password:
+                            unlocked = staged.with_name(staged.stem + ".unlocked.pdf")
+                            pt.decrypt(staged, unlocked, password)
+                            unlocked.replace(staged)
+                    except PermissionError:
+                        errors.append({"name": name, "error": "wrong password; stored encrypted"})
                 if _sniff_kind(staged) == "archive" and is_archive(staged):
                     bid = jobs.submit_batch(
                         "archive", staged, extract=extract, delete_after=True, label=name
@@ -699,6 +711,168 @@ def create_app(settings: Settings, *, validate: bool = True) -> FastAPI:
         shutil.rmtree(doc.dir, ignore_errors=True)
         store.audit("delete", f"{user.login}: {doc_id} ({doc.title})")
         return _back(request, "/", {"ok": True})
+
+    # -------------------------------------------------------------- PDF tools
+    def _pdf_original(doc) -> Path:
+        if doc.kind != "pdf" or "original" not in doc.outputs:
+            raise HTTPException(400, "not a PDF")
+        return doc.dir / doc.outputs["original"]
+
+    def _analysis_json(doc) -> dict | None:
+        p = doc.dir / "pdf-analysis.json"
+        try:
+            return json.loads(p.read_text()) if p.is_file() else None
+        except OSError, ValueError:
+            return None
+
+    @app.post("/doc/{doc_id}/pdf/analyze")
+    def pdf_analyze(
+        request: Request, doc_id: str, csrf: str = Form(""), user: User = Depends(require_user)
+    ):
+        """Forms, signatures, pagination, headers/footers, outline, encryption, PDF/A claim."""
+        csrf_check(request, user, csrf)
+        doc = store.get(doc_id)
+        if not doc:
+            raise HTTPException(404)
+        from .. import pdftools as pt
+
+        src = _pdf_original(doc)
+        out: dict = {"checked_at": time.time()}
+        enc = pt.encryption_info(src)
+        out["encryption"] = enc.to_dict()
+        if enc.needs_password:
+            out["locked"] = True
+            (doc.dir / "pdf-analysis.json").write_text(json.dumps(out))
+            return _back(request, f"/doc/{doc_id}", out)
+        md = ""
+        if "markdown" in doc.outputs:
+            md = _read_capped(doc.dir / doc.outputs["markdown"], 3_000_000)
+        out["pdfa"] = pt.pdfa_claim(src)
+        out["fields"] = [f.to_dict() for f in pt.list_fields(src)]
+        out["signatures"] = [f.to_dict() for f in pt.detect_signatures(src)]
+        out["pagination"] = pt.pagination(src).to_dict()
+        hf = pt.detect_headers_footers(src)
+        out["headers_footers"] = hf.to_dict()
+        out["outline"] = pt.outline(src, md or None)
+        (doc.dir / "pdf-analysis.json").write_text(json.dumps(out, ensure_ascii=False))
+        if (hf.headers or hf.footers) and "layout" in doc.outputs:
+            layout = _read_capped(doc.dir / doc.outputs["layout"], 20_000_000)
+            (doc.dir / "document.stripped.txt").write_text(pt.strip_headers_footers(layout, hf))
+            outputs = dict(doc.outputs)
+            outputs["stripped"] = "document.stripped.txt"
+            store.set_outputs(doc_id, outputs)
+        store.audit("pdf.analyze", f"{user.login}: {doc_id}")
+        return _back(request, f"/doc/{doc_id}", out)
+
+    @app.post("/doc/{doc_id}/pdf/unlock")
+    def pdf_unlock(
+        request: Request,
+        doc_id: str,
+        csrf: str = Form(""),
+        password: str = Form(""),
+        user: User = Depends(require_user),
+    ):
+        """Replace the stored original with a decrypted copy and re-run extraction."""
+        csrf_check(request, user, csrf)
+        doc = store.get(doc_id)
+        if not doc:
+            raise HTTPException(404)
+        from .. import pdftools as pt
+
+        src = _pdf_original(doc)
+        tmp = doc.dir / "original.unlocked.pdf"
+        try:
+            pt.decrypt(src, tmp, password or None)
+        except PermissionError as exc:
+            raise HTTPException(403, "wrong password") from exc
+        tmp.replace(src)
+        store.add_tags(doc_id, ["decrypted"])
+        store.requeue(doc_id)
+        jobs.submit(doc_id)
+        store.audit("pdf.unlock", f"{user.login}: {doc_id}")
+        return _back(request, f"/doc/{doc_id}", {"ok": True})
+
+    @app.post("/doc/{doc_id}/pdf/encrypt")
+    def pdf_encrypt(
+        request: Request,
+        doc_id: str,
+        csrf: str = Form(""),
+        password: str = Form(""),
+        allow_copy: str = Form(""),
+        user: User = Depends(require_user),
+    ):
+        """Write an AES-256 encrypted copy as an extra output (the original stays as is)."""
+        csrf_check(request, user, csrf)
+        doc = store.get(doc_id)
+        if not doc:
+            raise HTTPException(404)
+        if len(password) < 4:
+            raise HTTPException(400, "password too short")
+        from .. import pdftools as pt
+
+        src = _pdf_original(doc)
+        pt.encrypt(
+            src, doc.dir / "encrypted.pdf", user_password=password, allow_copy=allow_copy == "yes"
+        )
+        outputs = dict(doc.outputs)
+        outputs["encrypted"] = "encrypted.pdf"
+        store.set_outputs(doc_id, outputs)
+        store.audit("pdf.encrypt", f"{user.login}: {doc_id}")
+        return _back(request, f"/doc/{doc_id}", {"ok": True})
+
+    @app.post("/doc/{doc_id}/pdf/pdfa")
+    def pdf_pdfa(
+        request: Request,
+        doc_id: str,
+        csrf: str = Form(""),
+        level: int = Form(2),
+        user: User = Depends(require_user),
+    ):
+        csrf_check(request, user, csrf)
+        doc = store.get(doc_id)
+        if not doc:
+            raise HTTPException(404)
+        from .. import pdftools as pt
+        from ..tools.ghostscript import GhostscriptError
+
+        src = _pdf_original(doc)
+        try:
+            res = pt.to_pdfa(
+                src, doc.dir / "pdfa.pdf", level=2 if level not in (1, 2, 3) else level
+            )
+        except GhostscriptError as exc:
+            raise HTTPException(500, f"PDF/A conversion failed: {exc}") from exc
+        outputs = dict(doc.outputs)
+        outputs["pdfa"] = "pdfa.pdf"
+        store.set_outputs(doc_id, outputs)
+        an = _analysis_json(doc) or {}
+        an["pdfa_result"] = res
+        (doc.dir / "pdf-analysis.json").write_text(json.dumps(an, ensure_ascii=False))
+        store.audit("pdf.pdfa", f"{user.login}: {doc_id} claims={res['claims']}")
+        return _back(request, f"/doc/{doc_id}", res)
+
+    @app.post("/doc/{doc_id}/pdf/fill")
+    async def pdf_fill(request: Request, doc_id: str, user: User = Depends(require_user)):
+        """Fill AcroForm fields from the posted form (field names prefixed f_); flatten optional."""
+        form = await request.form()
+        csrf_check(request, user, str(form.get("csrf", "")))
+        doc = store.get(doc_id)
+        if not doc:
+            raise HTTPException(404)
+        from .. import pdftools as pt
+
+        values = {k[2:]: str(v) for k, v in form.multi_items() if k.startswith("f_")}
+        if not values:
+            raise HTTPException(400, "no field values")
+        src = _pdf_original(doc)
+        res = pt.fill_fields(
+            src, doc.dir / "filled.pdf", values, flatten=form.get("flatten") == "yes"
+        )
+        outputs = dict(doc.outputs)
+        outputs["filled"] = "filled.pdf"
+        store.set_outputs(doc_id, outputs)
+        store.audit("pdf.fill", f"{user.login}: {doc_id} {len(res['filled'])} field(s)")
+        return _back(request, f"/doc/{doc_id}", res)
 
     # -------------------------------------------------------------- literature graph
     def _graph_seeds(ids: list[str] | None) -> list[dict]:
@@ -1362,6 +1536,10 @@ def _download_name(doc, key: str, path: Path) -> str:
         "scholar": ".scholar.json",
         "references": ".references.json",
         "summary": ".summary.json",
+        "pdfa": ".pdfa.pdf",
+        "filled": ".filled.pdf",
+        "encrypted": ".encrypted.pdf",
+        "stripped": ".stripped.txt",
     }.get(key, path.suffix)
     if key == "original":
         return doc.original_name

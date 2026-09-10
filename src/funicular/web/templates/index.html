@@ -18,6 +18,10 @@
       <label class="choice"><input type="radio" name="ocr" value="auto" {% if ocr_default == 'auto' %}checked{% endif %}> Only where needed</label>
       <label class="choice"><input type="radio" name="ocr" value="force" {% if ocr_default == 'force' %}checked{% endif %}> Everything</label>
     </fieldset>
+    <details class="adv"><summary>Advanced</summary>
+      <label class="label" for="upload-password">Password for protected PDFs (used once, never stored)</label>
+      <input class="input" id="upload-password" name="password" type="password" autocomplete="off">
+    </details>
     <button class="btn btn-secondary" type="submit" id="upload-submit">Upload</button>
     <p id="upload-status" class="status" role="status" aria-live="polite"></p>
     <p class="muted small">Drop files here or in the iCloud folder <code>{{ settings.inbox_dir.name }}</code>. Zip and tar archives are unpacked, nested folders included. Up to {{ settings.max_upload_mb }} MB each.</p>

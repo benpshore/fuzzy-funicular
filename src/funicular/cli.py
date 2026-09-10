@@ -551,6 +551,97 @@ def zotero_import_cmd(
     j.stop("cli done")
 
 
+pdf_app = typer.Typer(help="PDF tools: analyse, unlock, encrypt, PDF/A, fill forms.")
+app.add_typer(pdf_app, name="pdf")
+
+
+@pdf_app.command("analyze")
+def pdf_analyze_cmd(
+    pdf: Annotated[Path, typer.Argument(exists=True, dir_okay=False)],
+    password: Annotated[str, typer.Option()] = "",
+) -> None:
+    """Encryption, PDF/A claim, form fields, signatures, pagination, headers/footers, outline."""
+    from . import pdftools as pt
+
+    enc = pt.encryption_info(pdf, password or None)
+    out = {"encryption": enc.to_dict()}
+    if not enc.needs_password:
+        pw = password or None
+        out.update(
+            pdfa=pt.pdfa_claim(pdf),
+            fields=[f.to_dict() for f in pt.list_fields(pdf, pw)],
+            signatures=[f.to_dict() for f in pt.detect_signatures(pdf, pw)],
+            pagination=pt.pagination(pdf, pw).to_dict(),
+            headers_footers=pt.detect_headers_footers(pdf, password=pw).to_dict(),
+            outline=pt.outline(pdf, None, pw),
+        )
+    console.print_json(json.dumps(out, ensure_ascii=False))
+
+
+@pdf_app.command("unlock")
+def pdf_unlock_cmd(
+    pdf: Annotated[Path, typer.Argument(exists=True, dir_okay=False)],
+    out: Annotated[Path, typer.Option("-o", "--out")],
+    password: Annotated[str, typer.Option(prompt=True, hide_input=True)] = "",
+) -> None:
+    from . import pdftools as pt
+
+    try:
+        pt.decrypt(pdf, out, password)
+    except PermissionError as exc:
+        err.print(f"[red]{exc}")
+        raise typer.Exit(code=1) from exc
+    console.print(f"[green]✓[/] {out}")
+
+
+@pdf_app.command("encrypt")
+def pdf_encrypt_cmd(
+    pdf: Annotated[Path, typer.Argument(exists=True, dir_okay=False)],
+    out: Annotated[Path, typer.Option("-o", "--out")],
+    password: Annotated[
+        str, typer.Option(prompt=True, hide_input=True, confirmation_prompt=True)
+    ] = "",
+    allow_copy: Annotated[bool, typer.Option()] = False,
+) -> None:
+    from . import pdftools as pt
+
+    pt.encrypt(pdf, out, user_password=password, allow_copy=allow_copy)
+    console.print(f"[green]✓[/] {out} (AES-256)")
+
+
+@pdf_app.command("pdfa")
+def pdf_pdfa_cmd(
+    pdf: Annotated[Path, typer.Argument(exists=True, dir_okay=False)],
+    out: Annotated[Path | None, typer.Option("-o", "--out")] = None,
+    level: Annotated[int, typer.Option(min=1, max=3)] = 2,
+) -> None:
+    """Convert to PDF/A-{level}b with Ghostscript; reports what the output claims."""
+    from . import pdftools as pt
+
+    out = out or pdf.with_name(pdf.stem + ".pdfa.pdf")
+    res = pt.to_pdfa(pdf, out, level=level)
+    console.print_json(json.dumps(res))
+    if res["claims"] is None:
+        raise typer.Exit(code=1)
+
+
+@pdf_app.command("fill")
+def pdf_fill_cmd(
+    pdf: Annotated[Path, typer.Argument(exists=True, dir_okay=False)],
+    out: Annotated[Path, typer.Option("-o", "--out")],
+    values: Annotated[list[str], typer.Option("--set", help="name=value (repeatable)")] = [],  # noqa: B006
+    flatten: Annotated[bool, typer.Option()] = False,
+) -> None:
+    from . import pdftools as pt
+
+    mapping = {}
+    for kv in values:
+        k, _, v = kv.partition("=")
+        mapping[k] = v
+    res = pt.fill_fields(pdf, out, mapping, flatten=flatten)
+    console.print_json(json.dumps(res))
+
+
 models_app = typer.Typer(help="Pre-fetch and inspect ML models (docling, Whisper, embeddings).")
 app.add_typer(models_app, name="models")
 

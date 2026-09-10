@@ -154,6 +154,8 @@
     fd.append("csrf", CSRF);
     var ocr = form.querySelector('input[name="ocr"]:checked');
     fd.append("ocr", ocr ? ocr.value : "off");
+    var pw = document.getElementById("upload-password");
+    if (pw && pw.value) fd.append("password", pw.value);
     for (var i = 0; i < files.length; i++) fd.append("files", files[i], files[i].name);
     var btn = document.getElementById("upload-submit");
     if (btn) btn.disabled = true;

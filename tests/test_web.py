@@ -84,12 +84,13 @@ def sign_in(c: TestClient, next_path: str = "/") -> str:
 
 def wait_done(c: TestClient, doc_id: str, timeout: float = 120) -> dict:
     deadline = time.time() + timeout
+    d: dict = {}
     while time.time() < deadline:
         d = c.get(f"/api/docs/{doc_id}").json()
-        if d["status"] in ("done", "failed"):
+        if d.get("status") in ("done", "failed"):
             return d
         time.sleep(0.2)
-    raise AssertionError("document never finished")
+    raise AssertionError(f"document never finished: {d}")
 
 
 # ------------------------------------------------------------------ config
@@ -1018,3 +1019,108 @@ def test_graph_page_and_build(client, fixtures, tmp_path):
     r = client.get("/graph")
     assert r.status_code == 200 and "Seed paper" in r.text and "graph-canvas" in r.text
     assert client.get("/api/graph").json()["nodes"]
+
+
+def test_pdf_tools_routes(client, fixtures, tmp_path):
+    import pymupdf
+
+    from funicular import pdftools as pt
+
+    csrf = sign_in(client)
+    r = client.post(
+        "/upload",
+        files=[("files", ("s.pdf", fixtures["scholarly"].read_bytes(), "application/pdf"))],
+        data={"csrf": csrf},
+        headers={"Accept": "application/json"},
+    )
+    doc_id = r.json()["created"][0]["id"]
+    wait_done(client, doc_id)
+    r = client.post(
+        f"/doc/{doc_id}/pdf/analyze", data={"csrf": csrf}, headers={"Accept": "application/json"}
+    )
+    a = r.json()
+    assert a["pagination"]["pages"] == 2 and a["headers_footers"]["headers"]
+    assert a["outline"]["markdown_headings"] > 0 and not a["encryption"]["encrypted"]
+    d = client.get(f"/api/docs/{doc_id}").json()
+    assert "stripped" in d["outputs"]
+    r = client.get(f"/doc/{doc_id}/file/stripped")
+    assert "Shore et al." not in r.text and "Riluzole" in r.text
+    r = client.get(f"/doc/{doc_id}")
+    assert "PDF tools" in r.text and "Heading structure" in r.text
+    r = client.post(
+        f"/doc/{doc_id}/pdf/encrypt",
+        data={"csrf": csrf, "password": "secret1"},
+        headers={"Accept": "application/json"},
+    )
+    assert r.status_code == 200
+    r = client.get(f"/doc/{doc_id}/file/encrypted")
+    enc = tmp_path / "enc.pdf"
+    enc.write_bytes(r.content)
+    assert pt.encryption_info(enc).needs_password
+    # upload the encrypted copy with the password: it is unlocked at import
+    r = client.post(
+        "/upload",
+        files=[("files", ("enc.pdf", enc.read_bytes(), "application/pdf"))],
+        data={"csrf": csrf, "password": "secret1"},
+        headers={"Accept": "application/json"},
+    )
+    d2 = r.json()["created"][0]["id"]
+    assert wait_done(client, d2)["pages"] == 2
+    # upload without password: stays locked; unlock route fixes it
+    r = client.post(
+        "/upload",
+        files=[("files", ("enc2.pdf", enc.read_bytes(), "application/pdf"))],
+        data={"csrf": csrf},
+        headers={"Accept": "application/json"},
+    )
+    d3 = r.json()["created"][0]["id"]
+    wait_done(client, d3)
+    r = client.post(
+        f"/doc/{d3}/pdf/analyze", data={"csrf": csrf}, headers={"Accept": "application/json"}
+    )
+    assert r.json().get("locked") is True
+    r = client.post(
+        f"/doc/{d3}/pdf/unlock",
+        data={"csrf": csrf, "password": "nope"},
+        headers={"Accept": "application/json"},
+    )
+    assert r.status_code == 403
+    r = client.post(
+        f"/doc/{d3}/pdf/unlock",
+        data={"csrf": csrf, "password": "secret1"},
+        headers={"Accept": "application/json"},
+    )
+    assert r.status_code == 200
+    assert wait_done(client, d3)["pages"] == 2
+    # forms
+    doc = pymupdf.open()
+    page = doc.new_page()
+    w = pymupdf.Widget()
+    w.field_name = "patient"
+    w.field_type = pymupdf.PDF_WIDGET_TYPE_TEXT
+    w.rect = pymupdf.Rect(50, 80, 300, 110)
+    w.field_value = ""
+    page.add_widget(w)
+    form_bytes = doc.tobytes()
+    doc.close()
+    r = client.post(
+        "/upload",
+        files=[("files", ("form.pdf", form_bytes, "application/pdf"))],
+        data={"csrf": csrf},
+        headers={"Accept": "application/json"},
+    )
+    d4 = r.json()["created"][0]["id"]
+    wait_done(client, d4)
+    r = client.post(
+        f"/doc/{d4}/pdf/analyze", data={"csrf": csrf}, headers={"Accept": "application/json"}
+    )
+    assert r.json()["fields"][0]["name"] == "patient"
+    r = client.post(
+        f"/doc/{d4}/pdf/fill",
+        data={"csrf": csrf, "f_patient": "B. Shore", "flatten": "yes"},
+        headers={"Accept": "application/json"},
+    )
+    assert r.json()["filled"] == ["patient"]
+    r = client.get(f"/doc/{d4}/file/filled")
+    with pymupdf.open(stream=r.content, filetype="pdf") as fd:
+        assert "B. Shore" in fd[0].get_text()
