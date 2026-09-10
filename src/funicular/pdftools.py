@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 import shutil
 import tempfile
@@ -22,6 +23,8 @@ import pymupdf
 
 from .textnorm import normalize
 from .tools import ghostscript
+
+log = logging.getLogger(__name__)
 
 
 # ------------------------------------------------------------------------------------------
@@ -125,46 +128,53 @@ def pdfa_claim(path: Path) -> str | None:
     return m.group(1) + (c.group(1).upper() if c else "")
 
 
-def _pdfa_def(tmp: Path) -> Path | None:
-    """Ghostscript's PDFA_def.ps with the ICC path pointed at its bundled sRGB profile."""
-    gs = ghostscript._gs()  # noqa: SLF001
-    lib = None
-    try:
-        from .resources import run
+_GS_PREFIXES = (
+    Path("/opt/homebrew/share/ghostscript"),
+    Path("/usr/local/share/ghostscript"),
+    Path("/usr/share/ghostscript"),
+    Path("/opt/local/share/ghostscript"),
+)
 
+
+def _pdfa_def(tmp: Path) -> Path | None:
+    """Ghostscript's PDFA_def.ps with the ICC path pointed at its bundled sRGB profile.
+
+    Looks only in Ghostscript's own search path and the known install prefixes; never walks
+    the whole filesystem."""
+    from .resources import Cancelled, run
+
+    gs = ghostscript._gs()  # noqa: SLF001
+    candidates: list[Path] = []
+    try:
         proc = run([gs, "-h"], timeout=20)
         for line in proc.stdout.decode("utf-8", "replace").splitlines():
             for part in line.split(":"):
                 part = part.strip()
-                if part.endswith("/lib") and (Path(part) / "PDFA_def.ps").is_file():
-                    lib = Path(part)
-    except Exception:  # noqa: BLE001
-        lib = None
-    if lib is None:
-        for cand in Path("/").glob("**/ghostscript/*/lib/PDFA_def.ps"):
-            lib = cand.parent
-            break
+                if part.endswith("/lib"):
+                    candidates.append(Path(part))
+    except Cancelled:
+        raise
+    except Exception as exc:  # noqa: BLE001 - fall back to the prefixes
+        log.debug("gs -h failed, using install prefixes: %s", exc)
+    for prefix in _GS_PREFIXES:
+        if prefix.is_dir():
+            candidates += sorted((d / "lib" for d in prefix.iterdir() if d.is_dir()), reverse=True)
+    lib = next((c for c in candidates if (c / "PDFA_def.ps").is_file()), None)
     if lib is None:
         return None
-    src = (lib / "PDFA_def.ps").read_text(errors="replace")
-    icc = None
-    for cand in (
+    icc_candidates = [
         lib.parent / "iccprofiles" / "default_rgb.icc",
         Path("/usr/share/color/icc/ghostscript/default_rgb.icc"),
-        Path("/opt/homebrew/share/ghostscript")
-        / lib.parent.name
-        / "iccprofiles"
-        / "default_rgb.icc",
-    ):
-        if cand.is_file():
-            icc = cand
-            break
-    if icc is None:
-        for cand in Path("/").glob("**/ghostscript/**/default_rgb.icc"):
-            icc = cand
-            break
+    ]
+    for prefix in _GS_PREFIXES:
+        if prefix.is_dir():
+            icc_candidates += [
+                d / "iccprofiles" / "default_rgb.icc" for d in prefix.iterdir() if d.is_dir()
+            ]
+    icc = next((c for c in icc_candidates if c.is_file()), None)
     if icc is None:
         return None
+    src = (lib / "PDFA_def.ps").read_text(errors="replace")
     src = re.sub(r"/ICCProfile \([^)]*\)", f"/ICCProfile ({icc})", src)
     out = tmp / "PDFA_def.ps"
     out.write_text(src)

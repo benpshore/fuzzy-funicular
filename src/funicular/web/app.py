@@ -37,7 +37,6 @@ from .watcher import InboxWatcher
 
 log = logging.getLogger(__name__)
 HERE = Path(__file__).parent
-PUBLIC_PATHS = ("/auth/", "/healthz", "/static/", "/manifest.webmanifest", "/apple-touch-icon.png")
 
 
 class ConfigError(SystemExit):
@@ -488,6 +487,8 @@ def create_app(settings: Settings, *, validate: bool = True) -> FastAPI:
                             unlocked.replace(staged)
                     except PermissionError:
                         errors.append({"name": name, "error": "wrong password; stored encrypted"})
+                    except Exception as exc:  # noqa: BLE001 - one damaged file must not sink the batch
+                        errors.append({"name": name, "error": f"could not open as PDF: {exc}"})
                 if _sniff_kind(staged) == "archive" and is_archive(staged):
                     bid = jobs.submit_batch(
                         "archive", staged, extract=extract, delete_after=True, label=name
@@ -709,6 +710,8 @@ def create_app(settings: Settings, *, validate: bool = True) -> FastAPI:
             raise HTTPException(400, "confirmation required")
         if doc.status in ("queued", "running"):
             raise HTTPException(409, "still processing; cancel it first or wait")
+        if not jobs.wait_idle(doc_id):
+            raise HTTPException(409, "background work on this document has not stopped; try again")
         store.delete(doc_id)
         jobs.index.remove_document(doc_id)
         import shutil
@@ -833,29 +836,17 @@ def create_app(settings: Settings, *, validate: bool = True) -> FastAPI:
         level: int = Form(2),
         user: User = Depends(require_user),
     ):
+        """Queue a PDF/A conversion (Ghostscript can take minutes; it runs as a tracked job)."""
         csrf_check(request, user, csrf)
         heavy(user, "pdfa")
         doc = store.get(doc_id)
         if not doc:
             raise HTTPException(404)
-        from .. import pdftools as pt
-        from ..tools.ghostscript import GhostscriptError
-
-        src = _pdf_original(doc)
-        try:
-            res = pt.to_pdfa(
-                src, doc.dir / "pdfa.pdf", level=2 if level not in (1, 2, 3) else level
-            )
-        except GhostscriptError as exc:
-            raise HTTPException(500, f"PDF/A conversion failed: {exc}") from exc
-        outputs = dict(doc.outputs)
-        outputs["pdfa"] = "pdfa.pdf"
-        store.set_outputs(doc_id, outputs)
-        an = _analysis_json(doc) or {}
-        an["pdfa_result"] = res
-        (doc.dir / "pdf-analysis.json").write_text(json.dumps(an, ensure_ascii=False))
-        store.audit("pdf.pdfa", f"{user.login}: {doc_id} claims={res['claims']}")
-        return _back(request, f"/doc/{doc_id}", res)
+        _pdf_original(doc)
+        if not jobs.submit_pdfa(doc_id, 2 if level not in (1, 2, 3) else level):
+            raise HTTPException(409, "a PDF/A conversion is already running")
+        store.audit("pdf.pdfa.start", f"{user.login}: {doc_id}")
+        return _back(request, f"/doc/{doc_id}", {"ok": True, "queued": True})
 
     @app.post("/doc/{doc_id}/pdf/fill")
     async def pdf_fill(request: Request, doc_id: str, user: User = Depends(require_user)):
@@ -1039,8 +1030,8 @@ def create_app(settings: Settings, *, validate: bool = True) -> FastAPI:
         heavy(user, "feeds")
         n = 0
         for e in jobs.feeds.entries(fid, status="new", limit=100):
-            jobs.pool.submit(jobs._safe_stage, e["id"])  # noqa: SLF001
-            n += 1
+            if jobs.submit_stage(e["id"]):
+                n += 1
         return _back(request, "/feeds", {"ok": True, "queued": n})
 
     @app.get("/api/feeds")
