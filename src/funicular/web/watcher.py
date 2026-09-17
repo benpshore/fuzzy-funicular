@@ -16,7 +16,7 @@ import time
 from pathlib import Path
 
 from ..config import Settings
-from .importer import ImportError_, import_path
+from .importer import FileBusy, ImportError_, import_path
 from .jobs import JobManager
 from .store import Store
 
@@ -82,6 +82,10 @@ class InboxWatcher:
                 count += 1
                 log.info("imported %s as %s", name, imported.doc.id)
                 self.store.audit("inbox.import", f"{name} -> {imported.doc.id}")
+            except FileBusy:
+                # Someone else (a manual folder import, a re-triggered scan) is already
+                # importing this exact file; not the file's fault, just try again next scan.
+                log.debug("inbox: %s: already being imported elsewhere, will retry", name)
             except ImportError_ as exc:
                 log.warning("inbox: %s: %s", name, exc)
                 self._quarantine(path, str(exc))

@@ -96,7 +96,7 @@ def archive_kind(path: Path) -> str | None:
             with tarfile.open(path, "r:*") as tf:
                 tf.next()
             return "tar"
-        except tarfile.TarError, EOFError, OSError:
+        except (tarfile.TarError, EOFError, OSError):
             return "gzip" if head[:2] == b"\x1f\x8b" else None
     if tar_magic.startswith(b"ustar"):
         return "tar"
@@ -104,7 +104,7 @@ def archive_kind(path: Path) -> str | None:
         try:
             with tarfile.open(path, "r:"):
                 return "tar"
-        except tarfile.TarError, OSError:
+        except (tarfile.TarError, OSError):
             return None
     return None
 
@@ -182,37 +182,47 @@ def extract_archive(
     members: list[tuple[str, int, int, Callable[[], io.BufferedIOBase]]] = []
     if kind == "zip":
         zf = zipfile.ZipFile(path)
-        for info in zf.infolist():
-            if info.is_dir():
-                continue
-            # symlinks in zips carry the S_IFLNK bit in the high 16 bits of external_attr
-            if (info.external_attr >> 16) & 0o170000 == 0o120000:
-                report.skipped.append(f"symlink: {info.filename}")
-                continue
-            rel = _safe_relpath(info.filename)
-            if rel is None:
-                report.skipped.append(f"unsafe or ignored: {info.filename}")
-                continue
-            if (
-                info.compress_size
-                and info.file_size / max(info.compress_size, 1) > limits.max_ratio
-            ):
-                report.skipped.append(f"suspicious compression ratio: {info.filename}")
-                continue
-            members.append((rel, info.file_size, info.compress_size, lambda i=info: zf.open(i)))  # type: ignore[return-value]
+        try:
+            for info in zf.infolist():
+                if info.is_dir():
+                    continue
+                # symlinks in zips carry the S_IFLNK bit in the high 16 bits of external_attr
+                if (info.external_attr >> 16) & 0o170000 == 0o120000:
+                    report.skipped.append(f"symlink: {info.filename}")
+                    continue
+                rel = _safe_relpath(info.filename)
+                if rel is None:
+                    report.skipped.append(f"unsafe or ignored: {info.filename}")
+                    continue
+                if (
+                    info.compress_size
+                    and info.file_size / max(info.compress_size, 1) > limits.max_ratio
+                ):
+                    report.skipped.append(f"suspicious compression ratio: {info.filename}")
+                    continue
+                members.append((rel, info.file_size, info.compress_size, lambda i=info: zf.open(i)))  # type: ignore[return-value]
+        except Exception:
+            # A corrupt/truncated central directory can raise mid-iteration; don't leak the fd.
+            zf.close()
+            raise
         closer = zf.close
     else:
         tf = tarfile.open(path, "r:*")
-        for info in tf:
-            if not info.isreg():
-                if info.issym() or info.islnk():
-                    report.skipped.append(f"link: {info.name}")
-                continue
-            rel = _safe_relpath(info.name)
-            if rel is None:
-                report.skipped.append(f"unsafe or ignored: {info.name}")
-                continue
-            members.append((rel, info.size, info.size, lambda i=info: tf.extractfile(i)))  # type: ignore[return-value]
+        try:
+            for info in tf:
+                if not info.isreg():
+                    if info.issym() or info.islnk():
+                        report.skipped.append(f"link: {info.name}")
+                    continue
+                rel = _safe_relpath(info.name)
+                if rel is None:
+                    report.skipped.append(f"unsafe or ignored: {info.name}")
+                    continue
+                members.append((rel, info.size, info.size, lambda i=info: tf.extractfile(i)))  # type: ignore[return-value]
+        except Exception:
+            # A truncated tar stream can raise mid-iteration; don't leak the fd.
+            tf.close()
+            raise
         closer = tf.close
 
     try:
