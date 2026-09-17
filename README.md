@@ -177,8 +177,10 @@ Targets are 52 px or larger, nothing needs dragging or two hands (drag-and-drop 
 compression slider both have button equivalents), no timed prompts, every action is a real
 form that works without JavaScript, progress is announced through `aria-live`, the graph has
 button/keyboard pan-zoom and a list view, and the theme follows the system with a manual
-override. Verified with Playwright at iPhone 14 Pro and iPad mini sizes and by tab order; not
-yet verified with a screen reader or switch access on a real device.
+override. None of this has been verified with an automated test yet — Playwright is not a
+project dependency and there is no browser test suite — nor with a screen reader or switch
+access on a real device. Treat every claim in this section as unverified until it has an
+automated or manually-logged check behind it.
 
 ## Tests
 

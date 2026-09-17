@@ -302,7 +302,7 @@ class Fetcher:
 def _year(parts: Any) -> int | None:
     try:
         return int(parts["date-parts"][0][0])
-    except KeyError, IndexError, TypeError, ValueError:
+    except (KeyError, IndexError, TypeError, ValueError):
         return None
 
 

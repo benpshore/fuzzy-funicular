@@ -33,7 +33,8 @@ STAGE_BASE = {
     "text": 86,
     "docling": 0,
     "index": 90,
-    "publish": 97,
+    "scholar": 95,
+    "publish": 98,
 }
 STAGE_SPAN = {
     "detect": 8,
@@ -42,8 +43,9 @@ STAGE_SPAN = {
     "markdown": 34,
     "text": 4,
     "docling": 88,
-    "index": 7,
-    "publish": 2,
+    "index": 5,
+    "scholar": 3,
+    "publish": 1,
 }
 STAGE_LABEL = {
     "queued": "Queued",
@@ -130,6 +132,14 @@ class JobManager:
     # ------------------------------------------------------------------ summaries / ask
     def submit_summarize(self, doc_id: str, provider_name: str | None = None) -> bool:
         key = f"summary:{doc_id}"
+        doc = self.store.get(doc_id)
+        # Guard against reading outputs while the main ingest job is still writing them.
+        # Checked by status, not `doc_id in self._active`: the ingest job stays registered
+        # through its own post-finish steps (index/scholar/publish) and calls this itself
+        # once store.finish() has already run, by which point status is "done" and the
+        # outputs it reads are real.
+        if doc is None or doc.status != "done":
+            return False
         with self._lock:
             if key in self._active:
                 return False
@@ -592,7 +602,7 @@ class JobManager:
                     try:
                         q.get_nowait()
                         q.put_nowait(event)
-                    except asyncio.QueueEmpty, asyncio.QueueFull:
+                    except (asyncio.QueueEmpty, asyncio.QueueFull):
                         log.debug("dropped progress event for a slow SSE client")
 
         try:
@@ -766,7 +776,7 @@ class JobManager:
     def submit_pdfa(self, doc_id: str, level: int = 2) -> bool:
         key = f"pdfa:{doc_id}"
         with self._lock:
-            if key in self._active:
+            if key in self._active or doc_id in self._active:
                 return False
             self._active[key] = JobContext(id=key)
         self._publish(
@@ -803,7 +813,7 @@ class JobManager:
             an_path = doc.dir / "pdf-analysis.json"
             try:
                 an = json.loads(an_path.read_text()) if an_path.is_file() else {}
-            except OSError, ValueError:
+            except (OSError, ValueError):
                 an = {}
             an["pdfa_result"] = res
             an_path.write_text(json.dumps(an, ensure_ascii=False))
@@ -1020,10 +1030,14 @@ class JobManager:
             if now - last["t"] < 0.15 and done != total:
                 return
             last["t"] = now
-            # Once finished, later stages (index, scholar, publish) must not flip the
-            # document back to "running": it is already usable.
+            # Once finished, later stages (index, scholar, publish) are additive background
+            # work: the document is already usable and store.finish() already persisted
+            # stage="done"/progress=100. Only broadcast live status for anyone watching;
+            # never write these transient stages back over the finished row, or the
+            # document is left permanently stuck at e.g. stage="publish"/progress=98.
             status = "done" if state["finished"] else "running"
-            self.store.update_progress(doc_id, stage, pct, status=status)
+            if not state["finished"]:
+                self.store.update_progress(doc_id, stage, pct, status=status)
             self._publish(
                 {
                     "type": "progress",

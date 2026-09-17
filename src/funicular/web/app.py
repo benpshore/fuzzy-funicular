@@ -375,13 +375,13 @@ def create_app(settings: Settings, *, validate: bool = True) -> FastAPI:
         if "report" in doc.outputs:
             try:
                 report = json.loads((doc.dir / doc.outputs["report"]).read_text())
-            except OSError, ValueError:
+            except (OSError, ValueError):
                 report = {}
         refs_report = None
         if "references" in doc.outputs:
             try:
                 refs_report = json.loads((doc.dir / doc.outputs["references"]).read_text())
-            except OSError, ValueError:
+            except (OSError, ValueError):
                 refs_report = None
         return render(
             request,
@@ -506,6 +506,7 @@ def create_app(settings: Settings, *, validate: bool = True) -> FastAPI:
                     move=True,
                     extract=extract,
                     filename=name,
+                    skip_duplicates=True,
                 )
                 created.append(
                     imported.doc.to_public()
@@ -579,7 +580,14 @@ def create_app(settings: Settings, *, validate: bool = True) -> FastAPI:
             return _back(request, "/", {"ok": True, "batch": bid})
         try:
             imp = import_path(
-                settings, store, jobs, file, source="folder", move=False, extract=extract
+                settings,
+                store,
+                jobs,
+                file,
+                source="folder",
+                move=False,
+                extract=extract,
+                skip_duplicates=True,
             )
         except ImportError_ as exc:
             raise HTTPException(400, str(exc)) from exc
@@ -730,7 +738,7 @@ def create_app(settings: Settings, *, validate: bool = True) -> FastAPI:
         p = doc.dir / "pdf-analysis.json"
         try:
             return json.loads(p.read_text()) if p.is_file() else None
-        except OSError, ValueError:
+        except (OSError, ValueError):
             return None
 
     @app.post("/doc/{doc_id}/pdf/analyze")
@@ -901,7 +909,7 @@ def create_app(settings: Settings, *, validate: bool = True) -> FastAPI:
         if cached.is_file():
             try:
                 data = json.loads(cached.read_text())
-            except OSError, ValueError:
+            except (OSError, ValueError):
                 data = None
         return render(request, "graph.html", user, graph=data, seeds=len(_graph_seeds(None)))
 
@@ -1067,7 +1075,7 @@ def create_app(settings: Settings, *, validate: bool = True) -> FastAPI:
         p = doc.dir / "summary.json"
         try:
             return json.loads(p.read_text()) if p.is_file() else None
-        except OSError, ValueError:
+        except (OSError, ValueError):
             return None
 
     @app.post("/doc/{doc_id}/summarize")
@@ -1168,7 +1176,7 @@ def create_app(settings: Settings, *, validate: bool = True) -> FastAPI:
         p = doc.dir / "scholar.json"
         try:
             return json.loads(p.read_text()) if p.is_file() else None
-        except OSError, ValueError:
+        except (OSError, ValueError):
             return None
 
     @app.get("/doc/{doc_id}/scholar")
@@ -1270,7 +1278,7 @@ def create_app(settings: Settings, *, validate: bool = True) -> FastAPI:
             try:
                 rep = json.loads((doc.dir / doc.outputs["report"]).read_text())
                 ocr_pages = len(rep["stats"]["signal"]["needs_ocr_pages"])
-            except OSError, ValueError, KeyError, TypeError:
+            except (OSError, ValueError, KeyError, TypeError):
                 ocr_pages = None
         minutes = (
             audio_minutes(original)

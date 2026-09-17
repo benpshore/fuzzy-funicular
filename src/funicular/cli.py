@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Annotated
 
 import typer
+from dotenv import load_dotenv
 from rich.console import Console
 from rich.progress import BarColumn, Progress, TextColumn, TimeElapsedColumn
 from rich.table import Table
@@ -39,6 +40,10 @@ def _main(
     ] = False,
     verbose: Annotated[bool, typer.Option("-v", "--verbose")] = False,
 ) -> None:
+    # Load .env before any subcommand runs (including lazy imports inside command bodies
+    # that read FUNICULAR_* at module import time, e.g. resources.py, embeddings.py).
+    # Settings.from_env() also calls this; override=False makes the repeat call harmless.
+    load_dotenv(Path.cwd() / ".env", override=False)
     logging.basicConfig(level=logging.DEBUG if verbose else logging.WARNING)
 
 

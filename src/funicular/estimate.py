@@ -60,7 +60,7 @@ class Timings:
         self._data: dict[str, list[float]] = {}
         try:
             self._data = json.loads(path.read_text())
-        except OSError, ValueError:
+        except (OSError, ValueError):
             self._data = {}
 
     def record(self, stage: str, seconds: float, units: int) -> None:
@@ -196,7 +196,7 @@ def audio_minutes(path: Path) -> float:
                 check=False,
             )
             return float(out.stdout.strip()) / 60.0
-        except ValueError, OSError, subprocess.TimeoutExpired:
+        except (ValueError, OSError, subprocess.TimeoutExpired):
             pass
     return max(0.5, path.stat().st_size / 1_000_000)
 
