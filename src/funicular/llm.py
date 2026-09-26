@@ -173,7 +173,10 @@ class OpenAICompatProvider(Provider):
                 raise LLMUnavailable(f"{self.name}: authentication failed (check the token)")
             if r.status_code >= 400:
                 raise LLMUnavailable(f"{self.name}: HTTP {r.status_code}: {r.text[:200]}")
-            data = r.json()
+            try:
+                data = r.json()
+            except ValueError as exc:
+                raise LLMUnavailable(f"{self.name}: non-JSON response: {r.text[:200]}") from exc
             choice = (data.get("choices") or [{}])[0]
             text = ((choice.get("message") or {}).get("content")) or ""
             usage = data.get("usage") or {}

@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 import re
 import shutil
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -41,6 +42,40 @@ ACCEPTED = {
 
 class ImportError_(ValueError):
     pass
+
+
+class FileBusy(ImportError_):
+    """The same underlying file is already mid-import elsewhere (another thread or a
+    concurrent import path — watcher vs. a manual folder import, a feed re-staged twice,
+    etc). Distinct from other ImportError_ causes so a caller can retry instead of treating
+    the file as bad."""
+
+
+_claim_lock = threading.Lock()
+_claimed: set[tuple[int, int]] = set()  # (st_dev, st_ino) of files currently mid-import
+
+
+class _FileClaim:
+    """Hold exclusive claim on one file's identity (not just its path — the same file can be
+    reached by different path spellings, e.g. an iCloud placeholder vs. its resolved target)
+    for the whole read-hash-copy/move-register sequence in import_path(). Without this, two
+    importers (the inbox watcher moving a file out from under a concurrent folder-import
+    copying it, or a feed/Zotero re-staged while already in flight) can race the same inode:
+    a torn read at best, a raised OSError or FileNotFoundError at worst."""
+
+    def __init__(self, path: Path) -> None:
+        st = path.stat()
+        self.key = (st.st_dev, st.st_ino)
+
+    def __enter__(self) -> None:
+        with _claim_lock:
+            if self.key in _claimed:
+                raise FileBusy(f"{self.key}: already being imported")
+            _claimed.add(self.key)
+
+    def __exit__(self, *exc_info: object) -> None:
+        with _claim_lock:
+            _claimed.discard(self.key)
 
 
 @dataclass
@@ -128,40 +163,45 @@ def import_path(
 ) -> Imported:
     limit = settings.max_upload_mb * 1024 * 1024
     path = ensure_local(path, timeout=settings.icloud_wait_seconds).path
-    size = path.stat().st_size
-    if size == 0:
-        raise ImportError_("empty file")
-    if size > limit:
-        raise ImportError_(f"file exceeds the {settings.max_upload_mb} MB limit")
-    h = hashlib.sha256()
-    with path.open("rb") as fh:
-        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
-            h.update(chunk)
-    if not move:
-        tmp_dir = settings.data_dir / "tmp"
-        tmp_dir.mkdir(parents=True, exist_ok=True)
-        tmp = tmp_dir / (h.hexdigest()[:16] + path.suffix.lower())
-        shutil.copy2(path, tmp)
-        path = tmp
-    if skip_duplicates:
-        dup = store.find_by_sha(h.hexdigest())
-        if dup is not None:
-            if not move:
-                path.unlink(missing_ok=True) if path.parent == settings.data_dir / "tmp" else None
-            return Imported(doc=dup, duplicate_of=dup)
-    return _register(
-        settings,
-        store,
-        jobs,
-        path,
-        filename or path.name,
-        h.hexdigest(),
-        size,
-        source,
-        extract,
-        discard_rejects=not move,  # a user's inbox file is theirs; only our temp copies go
-        tags=tags,
-    )
+    # Claim this exact file (by inode, not path) for the whole hash/copy-or-move/register
+    # sequence: two importers targeting the same real file (the inbox watcher moving it while
+    # a manual folder import copies it, a feed or Zotero item re-staged mid-import) must not
+    # race a shutil.move/copy or a sha256 read against each other.
+    with _FileClaim(path):
+        size = path.stat().st_size
+        if size == 0:
+            raise ImportError_("empty file")
+        if size > limit:
+            raise ImportError_(f"file exceeds the {settings.max_upload_mb} MB limit")
+        h = hashlib.sha256()
+        with path.open("rb") as fh:
+            for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                h.update(chunk)
+        if not move:
+            tmp_dir = settings.data_dir / "tmp"
+            tmp_dir.mkdir(parents=True, exist_ok=True)
+            tmp = tmp_dir / (h.hexdigest()[:16] + path.suffix.lower())
+            shutil.copy2(path, tmp)
+            path = tmp
+        if skip_duplicates:
+            dup = store.find_by_sha(h.hexdigest())
+            if dup is not None:
+                if not move:
+                    path.unlink(missing_ok=True) if path.parent == settings.data_dir / "tmp" else None
+                return Imported(doc=dup, duplicate_of=dup)
+        return _register(
+            settings,
+            store,
+            jobs,
+            path,
+            filename or path.name,
+            h.hexdigest(),
+            size,
+            source,
+            extract,
+            discard_rejects=not move,  # a user's inbox file is theirs; only our temp copies go
+            tags=tags,
+        )
 
 
 def _register(

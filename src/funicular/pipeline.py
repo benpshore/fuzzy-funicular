@@ -160,7 +160,11 @@ def _ingest_pdf(path, out_dir, settings, progress, stem, res) -> IngestResult:
     res.stats = ex.stats()
     res.stats["signal"] = ex.signal.to_dict()
     res.warnings.extend(ex.warnings)
-    res.needs_ocr = settings.ocr == "off" and bool(ex.signal.needs_ocr_pages)
+    # ex.signal is only recomputed post-OCR when at least one page actually succeeded (see
+    # pdf.py); if OCR was unavailable or every attempted page failed, it still reflects the
+    # pre-OCR scan, so checking needs_ocr_pages here (rather than gating on settings.ocr)
+    # correctly reports "still unread" even when OCR was attempted and didn't work.
+    res.needs_ocr = bool(ex.signal.needs_ocr_pages)
     res.title = (ex.info.title if ex.info else None) or _guess_title(ex.markdown or ex.plain_text)
     res.text_preview = _preview(ex.plain_text or ex.layout_text)
     return res

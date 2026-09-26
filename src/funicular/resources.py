@@ -110,7 +110,11 @@ def _child_limits() -> None:  # pragma: no cover - runs in the child between for
     try:
         import resource
 
-        # Fork-bomb guard: a child may not have more than N processes in its tree.
+        # Fork-bomb guard, best-effort: RLIMIT_NPROC caps processes for the child's real UID,
+        # not the child's own subtree, so this is not per-job isolation. On a box where the
+        # service account also runs other things, one job's fork bomb can still starve them,
+        # and a busy account can already be near the cap before this job even starts. Real
+        # per-tree isolation needs cgroups (Linux) or a job-owned uid; out of scope here.
         soft, hard = resource.getrlimit(resource.RLIMIT_NPROC)
         cap = CHILD_MAX_PROCS if hard == resource.RLIM_INFINITY else min(CHILD_MAX_PROCS, hard)
         resource.setrlimit(resource.RLIMIT_NPROC, (cap, hard))
@@ -242,7 +246,7 @@ def gpu_info() -> dict[str, Any]:
                     check=False,
                 )
                 info["chip"] = out.stdout.strip() or None
-            except OSError, subprocess.TimeoutExpired:
+            except (OSError, subprocess.TimeoutExpired):
                 pass
         info["ane_note"] = (
             "Apple Neural Engine is used by Vision OCR and Core ML models automatically; "
@@ -288,7 +292,7 @@ class SystemMonitor:
             disk = {"total_gb": None, "free_gb": None}
         try:
             load = os.getloadavg()
-        except AttributeError, OSError:
+        except (AttributeError, OSError):
             load = (0.0, 0.0, 0.0)
         job_rows = []
         for j in jobs:

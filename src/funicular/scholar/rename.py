@@ -40,7 +40,7 @@ def build_name(work: Work, template: str = DEFAULT_TEMPLATE, *, max_title: int =
     }
     try:
         name = template.format(**fields)
-    except KeyError, IndexError:
+    except (KeyError, IndexError):
         name = DEFAULT_TEMPLATE.format(**fields)
     return _clean(name, 200, keep_dots=False) or "document"
 

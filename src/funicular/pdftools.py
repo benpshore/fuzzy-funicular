@@ -43,12 +43,17 @@ class EncryptionInfo:
 
 def encryption_info(path: Path, password: str | None = None) -> EncryptionInfo:
     with pymupdf.open(path) as doc:
-        if doc.needs_pass:
+        # Capture before authenticate(): a successful authenticate() flips doc.is_encrypted
+        # to False, so checking it afterwards would misreport a correctly-unlocked encrypted
+        # PDF as unencrypted. needs_pass is the file's own property, unaffected by the caller
+        # having (or not having) a password on hand.
+        needs_pass = doc.needs_pass
+        if needs_pass:
             ok = bool(password) and doc.authenticate(password) > 0
             if not ok:
                 return EncryptionInfo(True, True)
         perms = doc.permissions
-        enc = doc.is_encrypted or bool(password)
+        enc = needs_pass or doc.is_encrypted
         return EncryptionInfo(
             enc,
             False,
@@ -307,7 +312,8 @@ def fill_fields(
                 if w.field_type == pymupdf.PDF_WIDGET_TYPE_CHECKBOX:
                     w.field_value = w.on_state() if v in (True, "true", "yes", "on", "1") else "Off"
                 elif w.field_type == pymupdf.PDF_WIDGET_TYPE_RADIOBUTTON:
-                    w.field_value = str(v) == str(w.on_state()) or v is True
+                    selected = str(v) == str(w.on_state()) or v is True
+                    w.field_value = w.on_state() if selected else "Off"
                 else:
                     w.field_value = "" if v is None else str(v)
                 w.update()

@@ -66,7 +66,13 @@ def extract_ids(text: str, *, head_chars: int = 20_000) -> Ids:
     head = text[:head_chars]
     ids = Ids()
     seen: list[str] = []
-    for m in list(DOI_URL_RE.finditer(head)) + list(DOI_RE.finditer(head)):
+    # Merge by actual position in the text, not by regex: concatenating "all URL-style
+    # matches" before "all bare-form matches" ranked a later dataset/reference DOI ahead
+    # of an earlier self-DOI whenever the earlier one happened to be bare-form.
+    matches = sorted(
+        [*DOI_URL_RE.finditer(head), *DOI_RE.finditer(head)], key=lambda m: m.start()
+    )
+    for m in matches:
         d = normalize_doi(m.group(1))
         if len(d) < 8 or d in seen:
             continue
